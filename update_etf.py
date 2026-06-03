@@ -173,16 +173,18 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .title-group .sub{{font-size:10px;color:var(--muted);margin-top:2px;font-family:var(--mono)}}
 .updated{{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right}}
 .chips{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}}
-.chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
+.chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;min-width:0;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
 .chip.off{{opacity:0.28;filter:grayscale(.7)}}
 .chip-dot{{width:7px;height:7px;border-radius:50%;flex-shrink:0}}
 .chip-info{{display:flex;flex-direction:column}}
 .chip-name{{font-size:11px;color:var(--text);font-family:var(--mono);line-height:1.2}}
 .chip-code{{font-size:9px;color:var(--muted);font-family:var(--mono)}}
-.chip-cum{{font-size:11px;font-family:var(--mono);font-weight:600;margin-left:2px}}
+.chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
+.chip-cum{{font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap}}
 .chip-eye{{color:var(--muted);padding:2px 3px;border-radius:4px;display:flex;align-items:center;transition:color .1s}}
 .chip-eye:hover{{color:var(--text)}}
-.chip.off .chip-eye svg{{stroke:#3a4a5a}}
+.chip.off .chip-eye svg{{stroke:#6b7a99}}
+.chip.off .chip-eye{{opacity:1!important}}
 .chip-detail{{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:20;background:#1a2438;border:1px solid #2a3f5f;border-radius:8px;padding:8px 12px;min-width:150px;font-size:11px;font-family:var(--mono);color:var(--text);white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4)}}
 .chip.show-detail .chip-detail{{display:block}}
 .cd-row{{display:flex;justify-content:space-between;gap:14px;margin-bottom:3px}}
@@ -211,13 +213,18 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .rate-cell .rc-d{{color:var(--muted);font-size:9px;display:block}}
 .rate-cell .rc-v{{font-weight:600}}
 .rate-cell.up{{background:rgba(240,79,90,.1)}}.rate-cell.dn{{background:rgba(79,156,240,.1)}}
+.rate-cell{{cursor:pointer;border:1px solid transparent;transition:border-color .1s,background .1s}}
+.rate-cell.selected{{border-color:rgba(255,255,255,.35)!important;background:rgba(255,255,255,.07)!important}}
+.rate-cell.selected .rc-d{{color:var(--text)}}
+.rate-cell:hover{{border-color:rgba(255,255,255,.15)}}
 .disclaimer{{font-size:10px;color:#3a4a5a;font-family:var(--mono);margin-top:8px;text-align:right}}
+.copyright{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)}}
 </style>
 </head>
 <body>
 <header>
   <div class="title-group">
-    <h1>주식 비교 대시보드 <span style="font-size:10px;font-weight:400;color:#f04f5a;font-family:var(--mono)">NXT(시간외)미반영</span></h1>
+    <h1>주식 비교 대시보드 <span style="font-size:10px;font-weight:400;color:#f04f5a;font-family:var(--mono)">NXT(시간외) 미반영</span></h1>
     <div class="sub">{stocks_sub}</div>
   </div>
   <div class="updated">{now}</div>
@@ -388,6 +395,24 @@ function buildRow(id,rows){{
 }}
 {rate_js}
 
+// 날짜 선택 하이라이트
+let selectedDate = null;
+document.addEventListener('click', e => {{
+  const cell = e.target.closest('.rate-cell');
+  if (!cell) return;
+  const date = cell.querySelector('.rc-d')?.textContent;
+  if (!date) return;
+  if (selectedDate === date) {{
+    selectedDate = null;
+    document.querySelectorAll('.rate-cell').forEach(c => c.classList.remove('selected'));
+  }} else {{
+    selectedDate = date;
+    document.querySelectorAll('.rate-cell').forEach(c => {{
+      c.classList.toggle('selected', c.querySelector('.rc-d')?.textContent === date);
+    }});
+  }}
+}});
+
 function setTab(t){{
   document.getElementById('tab-cum').style.display=t==='cum'?'':' none';
   document.getElementById('tab-day').style.display=t==='day'?'':' none';
@@ -395,6 +420,7 @@ function setTab(t){{
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
 </script>
+  <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
 </body>
 </html>"""
 
