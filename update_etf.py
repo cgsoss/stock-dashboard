@@ -138,10 +138,12 @@ def build_html(stocks):
             f'<span class="chip-name">{s["short"]}</span>'
             f'<span class="chip-code">{s["code"]}</span>'
             f'</div>'
+            f'<div class="chip-right">'
             f'<span class="chip-cum" style="color:{c}">{sign(cum)}%</span>'
             f'<span class="chip-eye" id="eye{i}" onclick="event.stopPropagation();toggleStock({i})">'
-            f'<svg id="eyeIcon{i}" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{EYE_ON}</svg>'
+            f'<svg id="eyeIcon{i}" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{EYE_ON}</svg>'
             f'</span>'
+            f'</div>'
             f'<div class="chip-detail" id="chipDetail{i}">'
             f'<div style="color:{c};font-size:11px;font-weight:700;margin-bottom:5px;padding-bottom:4px;border-bottom:1px solid #2a3f5f">{s["name"]}</div>'
             f'<div class="cd-row"><span>현재가</span><span>{last["close"]:,}원</span></div>'
@@ -172,7 +174,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .title-group h1{{font-size:16px;font-weight:700}}
 .title-group .sub{{font-size:10px;color:var(--muted);margin-top:2px;font-family:var(--mono)}}
 .updated{{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right}}
-.chips{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}}
+.chips{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin-bottom:12px}}
 .chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;min-width:0;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
 .chip.off{{opacity:0.28;filter:grayscale(.7)}}
 .chip-dot{{width:7px;height:7px;border-radius:50%;flex-shrink:0}}
@@ -180,10 +182,11 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .chip-name{{font-size:11px;color:var(--text);font-family:var(--mono);line-height:1.2}}
 .chip-code{{font-size:9px;color:var(--muted);font-family:var(--mono)}}
 .chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
-.chip-cum{{font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap}}
-.chip-eye{{color:var(--muted);padding:2px 3px;border-radius:4px;display:flex;align-items:center;transition:color .1s}}
+.chip-cum{{font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap;text-align:right}}
+.chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
+.chip-eye{{padding:2px 3px;border-radius:4px;display:flex;align-items:center;transition:color .1s;color:var(--muted)}}
 .chip-eye:hover{{color:var(--text)}}
-.chip.off .chip-eye svg{{stroke:#6b7a99}}
+.chip.off .chip-eye svg{{stroke:#8aa0bc}}
 .chip.off .chip-eye{{opacity:1!important}}
 .chip-detail{{display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:20;background:#1a2438;border:1px solid #2a3f5f;border-radius:8px;padding:8px 12px;min-width:150px;font-size:11px;font-family:var(--mono);color:var(--text);white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4)}}
 .chip.show-detail .chip-detail{{display:block}}
@@ -420,7 +423,7 @@ function setTab(t){{
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
 </script>
-  <div class="copyright">© 2026 CGSOS · All Rights Reserved</div>
+  <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
 </body>
 </html>"""
 
