@@ -338,6 +338,7 @@ const chartDay=new Chart(document.getElementById('chartDay'),{{type:'line',data:
 
 function toggleDetail(i){{
   const chip=document.getElementById('chip'+i);
+  if(!active[i])return;  // 하이드 상태면 무반응
   const wasOpen=chip.classList.contains('show-detail');
   document.querySelectorAll('.chip').forEach(c=>c.classList.remove('show-detail'));
   if(!wasOpen)chip.classList.add('show-detail');
@@ -345,7 +346,9 @@ function toggleDetail(i){{
 
 function toggleStock(i){{
   active[i]=!active[i];
-  document.getElementById('chip'+i).classList.toggle('off',!active[i]);
+  const chip=document.getElementById('chip'+i);
+  chip.classList.toggle('off',!active[i]);
+  chip.classList.remove('show-detail');  // 상세 닫기
   document.getElementById('eyeIcon'+i).innerHTML=active[i]?EYE_ON:EYE_OFF;
   const wrap=document.getElementById('rateRowWrap'+i);
   if(wrap)wrap.style.display=active[i]?'':' none';
