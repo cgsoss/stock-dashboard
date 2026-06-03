@@ -205,6 +205,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .rate-cell .rc-d{{color:var(--muted);font-size:9px;display:block}}
 .rate-cell .rc-v{{font-weight:600}}
 .rate-cell.up{{background:rgba(240,79,90,.1)}}.rate-cell.dn{{background:rgba(79,156,240,.1)}}
+.disclaimer{{font-size:10px;color:#3a4a5a;font-family:var(--mono);margin-top:8px;text-align:right}}
 </style>
 </head>
 <body>
@@ -230,6 +231,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
     <div class="tp-header"><span class="tp-date" id="tpCumDate"></span><span class="tp-close" onclick="closeTooltip('cum')">×</span></div>
     <div class="tp-rows" id="tpCumRows"></div>
   </div>
+  <div class="disclaimer">* 정규장 종가 기준 · 시간외거래 미반영 · 데이터 오류 가능성 있음</div>
 </div>
 
 <div class="chart-box" id="tab-day" style="display:none">
@@ -240,6 +242,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
     <div class="tp-rows" id="tpDayRows"></div>
   </div>
   <div class="rate-table">{rate_rows_html}</div>
+  <div class="disclaimer">* 정규장 종가 기준 · 시간외거래 미반영 · 데이터 오류 가능성 있음</div>
 </div>
 
 <script>
