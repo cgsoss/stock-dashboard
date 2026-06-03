@@ -175,10 +175,10 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .title-group .sub{{font-size:10px;color:var(--muted);margin-top:2px;font-family:var(--mono)}}
 .updated{{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right}}
 .chips{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin-bottom:12px}}
-.chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;min-width:0;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
+.chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;width:100%;min-width:0;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
 .chip.off{{opacity:0.28;filter:grayscale(.7)}}
 .chip-dot{{width:7px;height:7px;border-radius:50%;flex-shrink:0}}
-.chip-info{{display:flex;flex-direction:column}}
+.chip-info{{display:flex;flex-direction:column;flex:1;min-width:0;overflow:hidden}}
 .chip-name{{font-size:11px;color:var(--text);font-family:var(--mono);line-height:1.2}}
 .chip-code{{font-size:9px;color:var(--muted);font-family:var(--mono)}}
 .chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
@@ -377,7 +377,7 @@ function toggleStock(i){{
   chip.classList.remove('show-detail');  // 상세 닫기
   document.getElementById('eyeIcon'+i).innerHTML=active[i]?EYE_ON:EYE_OFF;
   const wrap=document.getElementById('rateRowWrap'+i);
-  if(wrap)wrap.style.display=active[i]?'':' none';
+  if(wrap)wrap.style.display=active[i]?'':'none';
   chartCum.data.datasets=mkDatasets(cumData);
   chartDay.data.datasets=mkDatasets(dayData);
   chartCum.update();chartDay.update();
