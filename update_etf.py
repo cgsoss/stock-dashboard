@@ -420,7 +420,7 @@ function setTab(t){{
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
 </script>
-  <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
+  <div class="copyright">© 2026 CGSOS · All Rights Reserved</div>
 </body>
 </html>"""
 
