@@ -27,7 +27,8 @@ def fetch_config(sheet_id):
             import re
             start = re.sub(r'[^\d]', '-', start)
             start = re.sub(r'-+', '-', start).strip('-')
-            items.append({'code': code, 'name': name, 'start': start})
+            short = row.get('축약명', '').strip() or name  # 없으면 정식명 사용
+            items.append({'code': code, 'name': name, 'short': short, 'start': start})
     print(f"[설정] {len(items)}개 종목 (Y): {[x['code']+' '+x['name'] for x in items]}")
     return items
 
@@ -134,7 +135,7 @@ def build_html(stocks):
             f'<div class="chip{" off" if i >= MAX_ACTIVE else ""}" id="chip{i}" style="--c:{c}" onclick="toggleDetail({i})">' 
             f'<div class="chip-dot" style="background:{c}"></div>'
             f'<div class="chip-info">'
-            f'<span class="chip-name">{s["name"]}</span>'
+            f'<span class="chip-name">{s["short"]}</span>'
             f'<span class="chip-code">{s["code"]}</span>'
             f'</div>'
             f'<span class="chip-cum" style="color:{c}">{sign(cum)}%</span>'
@@ -170,8 +171,8 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .title-group h1{{font-size:16px;font-weight:700}}
 .title-group .sub{{font-size:10px;color:var(--muted);margin-top:2px;font-family:var(--mono)}}
 .updated{{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right}}
-.chips{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}
-.chip{{display:flex;align-items:center;gap:6px;padding:5px 8px 5px 10px;border-radius:20px;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
+.chips{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}}
+.chip{{display:flex;align-items:center;gap:6px;padding:7px 8px 7px 10px;border-radius:10px;background:var(--surface);border:1px solid color-mix(in srgb,var(--c) 30%,transparent);cursor:pointer;transition:opacity .2s;position:relative;user-select:none}}
 .chip.off{{opacity:0.28;filter:grayscale(.7)}}
 .chip-dot{{width:7px;height:7px;border-radius:50%;flex-shrink:0}}
 .chip-info{{display:flex;flex-direction:column}}
@@ -416,7 +417,7 @@ if __name__ == '__main__':
         if not data:
             print(f"  경고: {item['code']} 건너뜀")
             continue
-        stocks.append({'code': item['code'], 'name': item['name'], 'data': add_changes(data)})
+        stocks.append({'code': item['code'], 'name': item['name'], 'short': item.get('short', item['name']), 'data': add_changes(data)})
 
     if len(stocks) < 2:
         print('오류: 최소 2개 종목 필요')
