@@ -86,6 +86,9 @@ def build_html(stocks):
         ('#b57bee','rgba(181,123,238,0.08)'),
         ('#50d8d7','rgba(80,216,215,0.08)'),
     ]
+    # 누적수익률 높은 순으로 정렬
+    stocks = sorted(stocks, key=lambda s: (s['data'][-1]['close']/s['data'][0]['close']-1), reverse=True)
+
     def sign(v): return f'+{v:.2f}' if v >= 0 else f'{v:.2f}'
     def col(v):  return palette[0][0] if v >= 0 else palette[1][0]
 
@@ -122,12 +125,13 @@ def build_html(stocks):
     EYE_OFF = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
 
     chips_html = ''
+    MAX_ACTIVE = 6
     for i, s in enumerate(stocks):
         c    = palette[i % len(palette)][0]
         last = s['data'][-1]
         cum  = round((last['close'] / s['data'][0]['close'] - 1) * 100, 2)
         chips_html += (
-            f'<div class="chip" id="chip{i}" style="--c:{c}" onclick="toggleDetail({i})">' 
+            f'<div class="chip{" off" if i >= MAX_ACTIVE else ""}" id="chip{i}" style="--c:{c}" onclick="toggleDetail({i})">' 
             f'<div class="chip-dot" style="background:{c}"></div>'
             f'<div class="chip-info">'
             f'<span class="chip-name">{s["name"]}</span>'
@@ -251,7 +255,7 @@ const cumData = [{all_cum_js}];
 const dayData = [{all_day_js}];
 const palette = {palette_js};
 const names   = {names_js};
-const active  = names.map(()=>true);
+const active  = names.map((_,i)=>i<6);
 let pinnedCum=false, pinnedDay=false;
 
 const EYE_ON  = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
@@ -338,6 +342,13 @@ const makeOpts=which=>({{
 
 const chartCum=new Chart(document.getElementById('chartCum'),{{type:'line',data:{{labels,datasets:mkDatasets(cumData)}},options:makeOpts('cum'),plugins:[endLabelPlugin]}});
 const chartDay=new Chart(document.getElementById('chartDay'),{{type:'line',data:{{labels,datasets:mkDatasets(dayData)}},options:makeOpts('day'),plugins:[endLabelPlugin]}});
+// 초기 하이드 종목 눈 아이콘 교체
+names.forEach((_,i)=>{{
+  if(!active[i]){{
+    const el=document.getElementById('eyeIcon'+i);
+    if(el)el.innerHTML=EYE_OFF;
+  }}
+}});
 
 function toggleDetail(i){{
   const chip=document.getElementById('chip'+i);
