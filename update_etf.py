@@ -18,12 +18,17 @@ def fetch_config(sheet_id):
     reader = csv.DictReader(io.StringIO(res.content.decode('utf-8')))
     items = []
     for row in reader:
-        code  = row.get('종목코드', '').strip().zfill(6)
-        name  = row.get('종목명', '').strip()
-        start = row.get('시작일', '').strip()
-        if code and name and start:
+        code   = row.get('종목코드', '').strip().zfill(6)
+        name   = row.get('종목명', '').strip()
+        start  = row.get('시작일', '').strip().replace('. ', '-').replace('.', '-')
+        display = row.get('표시', '').strip().upper()
+        if code and name and start and display == 'Y':
+            # 날짜 형식 정리: 2026. 01. 01 → 2026-01-01
+            import re
+            start = re.sub(r'[^\d]', '-', start)
+            start = re.sub(r'-+', '-', start).strip('-')
             items.append({'code': code, 'name': name, 'start': start})
-    print(f"[설정] {len(items)}개 종목: {[x['code']+' '+x['name'] for x in items]}")
+    print(f"[설정] {len(items)}개 종목 (Y): {[x['code']+' '+x['name'] for x in items]}")
     return items
 
 # ── pykrx로 일별 시세 가져오기 ──
