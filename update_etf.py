@@ -35,9 +35,10 @@ def fetch_config(sheet_id):
 def fetch_pykrx(code, start_date_str):
     """
     start_date_str: 'YYYY-MM-DD'
+    데이터가 없는 구간(상장 전)은 자동으로 건너뜀
     반환: [{'date': 'YYYY/MM/DD', 'close': int}, ...]
     """
-    start = start_date_str.replace('-', '')          # '20260101'
+    start = start_date_str.replace('-', '')
     end   = date.today().strftime('%Y%m%d')
 
     try:
@@ -56,7 +57,15 @@ def fetch_pykrx(code, start_date_str):
         if c > 0:
             rows.append({'date': dt.strftime('%Y/%m/%d'), 'close': c})
 
+    if not rows:
+        print(f'  [{code}] 유효 데이터 없음')
+        return []
+
     rows.sort(key=lambda x: x['date'])
+    actual_start = rows[0]['date']
+    req_start    = start_date_str.replace('-', '/')
+    if actual_start != req_start:
+        print(f'  [{code}] 시작일 자동조정: {req_start} → {actual_start} (상장일 기준)')
     print(f'  [{code}] {len(rows)}개 ({rows[0]["date"]} ~ {rows[-1]["date"]})')
     return rows
 
@@ -81,11 +90,32 @@ def build_html(stocks):
     def sign(v): return f'+{v:.2f}' if v >= 0 else f'{v:.2f}'
     def col(v):  return palette[0][0] if v >= 0 else palette[1][0]
 
-    labels = [r['date'][5:] for r in stocks[0]['data']]
+    # 전체 날짜 유니온 (상장일이 다른 종목 대비)
+    all_dates = sorted(set(r['date'] for s in stocks for r in s['data']))
+    labels = [d[5:] for d in all_dates]  # MM/DD 형식
+
+    # 각 종목 데이터를 전체 날짜에 맞춰 정렬 (없는 날은 None)
+    def align_data(data, mode):
+        dmap = {r['date']: r for r in data}
+        result = []
+        for d in all_dates:
+            if d in dmap:
+                result.append(dmap[d][mode])
+            else:
+                result.append(None)
+        return result
 
     def cum_vals(data):
-        base = data[0]['close']
-        return [round((r['close']/base - 1)*100, 2) for r in data]
+        # 실제 데이터 있는 첫날 기준
+        first_close = data[0]['close']
+        dmap = {r['date']: r['close'] for r in data}
+        result = []
+        for d in all_dates:
+            if d in dmap:
+                result.append(round((dmap[d] / first_close - 1) * 100, 2))
+            else:
+                result.append(None)
+        return result
 
     all_cum_js = ',\n'.join(
         f"  {json.dumps(cum_vals(s['data']))}"
@@ -98,7 +128,7 @@ def build_html(stocks):
         rate_rows_html += f'<div class="rate-row" id="rateRowWrap{i}"><span class="rate-label" style="color:{c}">{s["name"][:6]}</span><div class="rate-cells" id="rateRow{i}"></div></div>\n'
 
     rate_js = '\n'.join(
-        f"buildRow('rateRow{i}', {json.dumps(s['data'][-30:])});"
+        f"buildRow('rateRow{i}', {json.dumps([r for r in s['data'] if r][-30:])});"
         for i, s in enumerate(stocks)
     )
 
@@ -251,7 +281,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 
 <script>
 const labels = {json.dumps(labels)};
-const allData = {json.dumps([s['data'] for s in stocks])};
+const allData = {json.dumps([align_data(s['data'], 'change') for s in stocks])};
 const cumData = [
 {all_cum_js}
 ];
@@ -322,14 +352,17 @@ const commonOpts = (tooltipId, dateId, rowsId, arrowId, pinnedRef)=>{{
             .filter(p=>active[p.datasetIndex])
             .map(p=>`<div class="tt-row"><span style="color:${{palette[p.datasetIndex%palette.length]}}">${{names[p.datasetIndex]}}</span><span>${{sign(p.raw)}}%</span></div>`)
             .join('');
-          const box=chart.canvas.getBoundingClientRect();
-          const x=tooltip.caretX;
-          const chartBox=document.getElementById(tooltipId).closest('.chart-box');
-          const cbRect=chartBox.getBoundingClientRect();
           tp.style.display='block';
-          tp.style.left=Math.min(x-20, chart.width-140)+'px';
+          // 클릭 위치가 차트 오른쪽 절반이면 툴팁을 왼쪽에, 왼쪽 절반이면 오른쪽에
+          const caretX=tooltip.caretX;
+          const chartW=chart.width;
+          const tpW=140;
+          if(caretX > chartW * 0.55){{
+            tp.style.left=Math.max(0, caretX-tpW-20)+'px';
+          }}else{{
+            tp.style.left=Math.min(caretX+20, chartW-tpW)+'px';
+          }}
           tp.style.top='-2px';
-          // 화살표 높이
           const arrow=document.getElementById(arrowId);
           const tpH=tp.offsetHeight;
           const caretY=tooltip.caretY;
