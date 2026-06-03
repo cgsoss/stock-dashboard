@@ -224,7 +224,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 <body>
 <header>
   <div class="title-group">
-    <h1>주식 비교 대시보드 <span style="font-size:10px;font-weight:400;color:#f04f5a;font-family:var(--mono)">NXT(시간외) 미반영</span></h1>
+    <h1>주식 비교 대시보드 <span style="font-size:10px;font-weight:400;color:#f04f5a;font-family:var(--mono)">NXT(시간외)미반영</span></h1>
     <div class="sub">{stocks_sub}</div>
   </div>
   <div class="updated">{now}</div>
