@@ -108,7 +108,8 @@ def build_html(stocks):
         return [round((dmap[d]/base-1)*100,2) if d in dmap else None for d in all_dates]
 
     all_cum_js = ',\n'.join(f'  {json.dumps(cum_vals(s["data"]))}' for s in stocks)
-    all_day_js = ',\n'.join(f'  {json.dumps(align(s["data"],"change"))}' for s in stocks)
+    all_day_js   = ',\n'.join(f'  {json.dumps(align(s["data"],"change"))}' for s in stocks)
+    all_close_js = ',\n'.join(f'  {json.dumps(align(s["data"],"close"))}' for s in stocks)
 
     rate_rows_html = ''
     for i, s in enumerate(stocks):
@@ -209,7 +210,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .tp-close{{cursor:pointer;color:var(--muted);font-size:16px;line-height:1;padding:0 3px}}
 .tp-close:hover{{color:#ef4444}}
 .tp-rows{{display:flex;flex-wrap:wrap;gap:5px 14px}}
-.tp-row{{display:flex;align-items:center;gap:5px;font-size:11px}}
+.tp-row{{display:flex;align-items:center;gap:7px;padding:4px 0;border-bottom:1px solid #1e2d45}}.tp-row:last-child{{border-bottom:none}}
 .tp-dot{{width:6px;height:6px;border-radius:50%;flex-shrink:0}}
 .rate-table{{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}}
 .rate-row{{display:flex;gap:5px;align-items:flex-start;margin-bottom:6px}}
@@ -268,6 +269,7 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 const labels  = {labels_js};
 const cumData = [{all_cum_js}];
 const dayData = [{all_day_js}];
+const closeData = [{all_close_js}];
 const palette = {palette_js};
 const names   = {names_js};
 const active  = names.map((_,i)=>i<6);
@@ -314,13 +316,27 @@ function mkDatasets(data){{
 }}
 
 function showTooltip(which,idx){{
-  const data=which==='cum'?cumData:dayData;
   document.getElementById(which==='cum'?'tpCumDate':'tpDayDate').textContent=labels[idx];
   document.getElementById(which==='cum'?'tpCumRows':'tpDayRows').innerHTML=
     names.map((n,i)=>{{
-      if(!active[i]||data[i][idx]==null)return'';
-      const c=palette[i%palette.length],v=data[i][idx],vc=v>=0?'#f04f5a':'#4f9cf0';
-      return `<div class="tp-row"><div class="tp-dot" style="background:${{c}}"></div><span>${{n}}</span><span style="color:${{vc}};font-weight:600">${{sign(v)}}%</span></div>`;
+      if(!active[i]||cumData[i][idx]==null)return'';
+      const c=palette[i%palette.length];
+      const cumV=cumData[i][idx], dayV=dayData[i][idx];
+      const cumC=cumV>=0?'#f04f5a':'#4f9cf0';
+      const dayC=dayV>=0?'#f04f5a':'#4f9cf0';
+      const dayBg=dayV>=0?'rgba(240,79,90,.15)':'rgba(79,156,240,.15)';
+      const price=closeData[i][idx]!=null?closeData[i][idx].toLocaleString()+'원':'';
+      return `<div class="tp-row">
+        <div class="tp-dot" style="background:${{c}}"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:11px;color:#dce8f5">${{n}}</div>
+          <div style="font-size:9px;color:#6b7a99">${{price}}</div>
+        </div>
+        <div style="display:flex;gap:5px;align-items:center;flex-shrink:0">
+          <span style="font-size:12px;font-weight:700;color:${{cumC}}">${{sign(cumV)}}%</span>
+          <span style="font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600;background:${{dayBg}};color:${{dayC}}">${{sign(dayV)}}%</span>
+        </div>
+      </div>`;
     }}).join('');
   document.getElementById(which==='cum'?'tpCum':'tpDay').classList.add('visible');
 }}
