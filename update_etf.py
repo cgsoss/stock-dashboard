@@ -87,6 +87,8 @@ def build_html(stocks):
         ('#b57bee','rgba(181,123,238,0.08)'),
         ('#50d8d7','rgba(80,216,215,0.08)'),
     ]
+    MAX_ACTIVE = 6
+
     # 누적수익률 높은 순으로 정렬
     stocks = sorted(stocks, key=lambda s: (s['data'][-1]['close']/s['data'][0]['close']-1), reverse=True)
 
@@ -121,14 +123,13 @@ def build_html(stocks):
     for i, s in enumerate(stocks):
         rate_js_lines.append(f'buildRow("rateRow{i}", {json.dumps([r for r in s["data"]][-30:])});')
         if i >= MAX_ACTIVE:
-            rate_js_lines.append(f'document.getElementById("rateRowWrap{i}").style.display="none";')
+            rate_js_lines.append(f'document.getElementById("rateRowWrap{i}").style.display=\'none\';')
     rate_js = '\n'.join(rate_js_lines)
 
     EYE_ON  = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>' 
     EYE_OFF = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
 
     chips_html = ''
-    MAX_ACTIVE = 6
     for i, s in enumerate(stocks):
         c    = palette[i % len(palette)][0]
         last = s['data'][-1]
