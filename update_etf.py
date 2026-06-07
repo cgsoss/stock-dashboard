@@ -67,7 +67,76 @@ def add_changes(rows):
     return rows
 
 # ── 공포탐욕지수 계산 ──
+def fetch_scoreport():
+    """scoreport.kr에서 공포탐욕지수 직접 스크래핑"""
+    import re
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+        'Referer': 'https://scoreport.kr/',
+    })
+    try:
+        # 먼저 메인 페이지 방문 (쿠키 획득)
+        session.get('https://scoreport.kr/', timeout=10)
+        resp = session.get('https://scoreport.kr/fear-greed', timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+
+        # __NEXT_DATA__ JSON 파싱
+        m = re.search(r'id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m:
+            import json as _json
+            data = _json.loads(m.group(1))
+            # props에서 데이터 탐색
+            props = data.get('props', {}).get('pageProps', {})
+            
+            # 여러 키 시도
+            fg_total = None
+            fg_kospi  = None
+            fg_kosdaq = None
+            
+            for key in ['fearGreedTotal', 'totalScore', 'score', 'fearGreed']:
+                if key in props:
+                    fg_total = props[key]
+                    break
+            
+            for key in ['fearGreedKospi', 'kospiScore', 'kospi']:
+                if key in props:
+                    fg_kospi = props[key]
+                    break
+
+            for key in ['fearGreedKosdaq', 'kosdaqScore', 'kosdaq']:
+                if key in props:
+                    fg_kosdaq = props[key]
+                    break
+
+            print(f'  scoreport 수집: 전체={fg_total}, 코스피={fg_kospi}, 코스닥={fg_kosdaq}')
+            print(f'  props 키: {list(props.keys())[:10]}')
+            return {'total': fg_total, 'kospi': fg_kospi, 'kosdaq': fg_kosdaq}
+        
+        # __NEXT_DATA__ 없으면 HTML에서 직접 파싱
+        # 숫자 패턴들
+        patterns = [
+            (r'전체.*?(\d+)\s*(?:극단적\s*)?(?:공포|중립|탐욕)', 'total'),
+            (r'코스피.*?(\d+)\s*(?:극단적\s*)?(?:공포|중립|탐욕)', 'kospi'),
+        ]
+        result = {}
+        for pat, key in patterns:
+            m2 = re.search(pat, html, re.DOTALL)
+            if m2:
+                result[key] = int(m2.group(1))
+        
+        print(f'  HTML 파싱: {result}')
+        return result if result else None
+
+    except Exception as e:
+        print(f'  scoreport 수집 실패: {e}')
+        return None
+
 def fetch_yahoo(ticker, period='1y'):
+    """Yahoo Finance에서 일별 종가 가져오기"""
     import urllib.request, json as _json, pandas as pd
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval=1d"
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -85,7 +154,6 @@ def fetch_yahoo(ticker, period='1y'):
         return None
 
 def normalize_125(series):
-    """feargreed.co.kr 동일 방식: 125거래일 내 min/max 기준 정규화"""
     arr = np.array(series[-125:])
     mn, mx = arr.min(), arr.max()
     if mx == mn:
@@ -94,30 +162,32 @@ def normalize_125(series):
 
 def calc_fear_greed():
     print('\n[공포탐욕지수] 계산 시작...')
+
+    # 먼저 scoreport.kr에서 직접 가져오기 시도
+    sp_data = fetch_scoreport()
+    
     scores = {}
     history = []
 
     try:
-        # ── 지표1: 시장 모멘텀 (코스피 vs 125일 이동평균) ──
         df_ks = fetch_yahoo('^KS11', '2y')
         if df_ks is not None and len(df_ks) >= 125:
             closes = df_ks['close'].values
             ma125   = np.mean(closes[-125:])
-            # 모멘텀 = 코스피 / MA125 비율의 125일 정규화
-            momentum_series = [closes[i] / np.mean(closes[max(0,i-125):i]) 
+            momentum_series = [closes[i] / np.mean(closes[max(0,i-125):i])
                                for i in range(125, len(closes))]
             if momentum_series:
-                mn, mx = min(momentum_series), max(momentum_series[-125:])
-                cur = momentum_series[-1]
-                scores['momentum'] = float(np.clip((cur - min(momentum_series[-125:])) / 
-                                                    (mx - min(momentum_series[-125:]) + 1e-9) * 100, 0, 100))
+                mn125 = min(momentum_series[-125:])
+                mx125 = max(momentum_series[-125:])
+                cur   = momentum_series[-1]
+                scores['momentum'] = float(np.clip((cur - mn125) / (mx125 - mn125 + 1e-9) * 100, 0, 100))
             else:
                 scores['momentum'] = 50.0
             print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={closes[-1]:.0f}, MA125={ma125:.0f})')
         else:
             scores['momentum'] = 50.0
 
-        # ── 지표2: 주가 강도 (52주 신고가 vs 신저가) ──
+        # 주가 강도
         try:
             end_today = date.today().strftime('%Y%m%d')
             start_52w = (date.today() - timedelta(days=380)).strftime('%Y%m%d')
@@ -128,21 +198,17 @@ def calc_fear_greed():
                     df_t = stock.get_market_ohlcv(start_52w, end_today, t)
                     if df_t is None or len(df_t) < 2: continue
                     c_today = df_t['종가'].iloc[-1]
-                    h_52 = df_t['고가'].max()
-                    l_52 = df_t['저가'].min()
-                    if c_today >= h_52 * 0.98: high52 += 1
-                    elif c_today <= l_52 * 1.02: low52 += 1
+                    if c_today >= df_t['고가'].max() * 0.98: high52 += 1
+                    elif c_today <= df_t['저가'].min() * 1.02: low52 += 1
                 except: continue
             total = high52 + low52
-            raw_ratio = high52 / total if total > 0 else 0.5
-            # 125일 히스토리 없으니 단순 정규화 (0.5 기준 ±0.5)
-            scores['strength'] = float(np.clip(raw_ratio * 100, 0, 100))
+            scores['strength'] = float(np.clip(high52 / total * 100, 0, 100)) if total > 0 else 50.0
             print(f'  주가강도: {scores["strength"]:.1f} (신고가={high52}, 신저가={low52})')
         except Exception as e:
             print(f'  주가강도 오류: {e}')
             scores['strength'] = 50.0
 
-        # ── 지표3: 주가 폭 (상승/하락 종목수) ──
+        # 주가 폭
         try:
             end_today = date.today().strftime('%Y%m%d')
             start_5d  = (date.today() - timedelta(days=7)).strftime('%Y%m%d')
@@ -163,58 +229,68 @@ def calc_fear_greed():
             print(f'  주가폭 오류: {e}')
             scores['breadth'] = 50.0
 
-        # ── 지표4: 변동성 VKOSPI vs 50일 이동평균 (역방향) ──
+        # 변동성 VKOSPI
         df_vk = fetch_yahoo('^VKOSPI', '1y')
         if df_vk is not None and len(df_vk) >= 50:
             vk_vals = df_vk['close'].values
-            # VKOSPI 높을수록 공포 → 역방향 정규화
-            vk_inv = [-v for v in vk_vals]  # 부호 뒤집기
+            vk_inv  = [-v for v in vk_vals]
             scores['volatility'] = normalize_125(vk_inv)
             print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_vals[-1]:.2f})')
         else:
             scores['volatility'] = 50.0
-            print(f'  변동성: VKOSPI 미수집')
 
-        # ── 지표5: 안전자산 수요 (코스피 vs 국고채 20일 수익률) ──
+        # 안전자산 수요
         try:
             end_today = date.today().strftime('%Y%m%d')
             start_30d = (date.today() - timedelta(days=45)).strftime('%Y%m%d')
             df_ktb = stock.get_market_ohlcv(start_30d, end_today, '148070')
             if df_ks is not None and df_ktb is not None and len(df_ktb) >= 20:
-                ks_vals  = df_ks['close'].values
+                ks_vals   = df_ks['close'].values
                 kospi_ret = (ks_vals[-1] / ks_vals[-20] - 1) * 100
                 ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
                 diff = kospi_ret - ktb_ret
                 scores['safe_demand'] = float(np.clip((diff + 10) / 20 * 100, 0, 100))
-                print(f'  안전자산: {scores["safe_demand"]:.1f} (코스피20d={kospi_ret:.2f}%, 채권={ktb_ret:.2f}%)')
+                print(f'  안전자산: {scores["safe_demand"]:.1f}')
             else:
                 scores['safe_demand'] = 50.0
         except Exception as e:
             print(f'  안전자산 오류: {e}')
             scores['safe_demand'] = 50.0
 
-        # ── 최종 점수 ──
-        final = round(sum(scores.values()) / len(scores), 1)
-        print(f'  최종 공포탐욕지수: {final}')
-        print(f'  지표별: {scores}')
+        # 최종 점수: scoreport 성공 시 해당 수치 사용, 아니면 자체 계산
+        self_score = round(sum(scores.values()) / len(scores), 1)
+        
+        if sp_data and sp_data.get('total') is not None:
+            final = sp_data['total']
+            print(f'  ✓ scoreport 수치 사용: {final} (자체계산: {self_score})')
+            source = 'scoreport'
+        else:
+            final = self_score
+            print(f'  자체계산 수치 사용: {final}')
+            source = 'self'
 
-        # ── 30일 추이 ──
+        # 30일 추이
         if df_ks is not None and len(df_ks) >= 155:
             ks_closes = df_ks['close'].values
             for i in range(30, 0, -1):
                 idx = len(ks_closes) - i
                 if idx >= 125:
-                    sub_momentum = [ks_closes[j] / np.mean(ks_closes[max(0,j-125):j])
-                                    for j in range(max(125, idx-124), idx+1)]
-                    if sub_momentum:
-                        mn2 = min(sub_momentum)
-                        mx2 = max(sub_momentum)
+                    sub = [ks_closes[j] / np.mean(ks_closes[max(0,j-125):j])
+                           for j in range(max(125,idx-124), idx+1)]
+                    if sub:
+                        mn2 = min(sub); mx2 = max(sub)
                         cur2 = ks_closes[idx-1] / np.mean(ks_closes[idx-125:idx])
-                        day_score = float(np.clip((cur2 - mn2) / (mx2 - mn2 + 1e-9) * 100, 0, 100))
+                        day_score = float(np.clip((cur2-mn2)/(mx2-mn2+1e-9)*100, 0, 100))
                         d = df_ks.index[idx-1].strftime('%m/%d')
-                        history.append({'date': d, 'score': round(day_score, 1)})
+                        history.append({'date': d, 'score': round(day_score,1)})
 
-        return {'score': final, 'scores': scores, 'history': history[-30:] if history else []}
+        return {
+            'score':   final,
+            'scores':  scores,
+            'history': history[-30:] if history else [],
+            'source':  source,
+            'sp_data': sp_data,
+        }
 
     except Exception as e:
         import traceback
