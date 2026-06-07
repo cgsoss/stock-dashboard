@@ -9,7 +9,6 @@ import json, os, sys, csv, io
 import requests
 from datetime import datetime, date, timedelta
 from pykrx import stock
-import numpy as np
 
 # ── Google Sheets에서 종목 목록 읽기 ──
 def fetch_config(sheet_id):
@@ -66,242 +65,8 @@ def add_changes(rows):
         r['change'] = 0.0 if i == 0 else round((r['close'] / rows[i-1]['close'] - 1) * 100, 2)
     return rows
 
-# ── 공포탐욕지수 계산 ──
-def fetch_scoreport():
-    """scoreport.kr에서 공포탐욕지수 직접 스크래핑"""
-    import re
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
-        'Referer': 'https://scoreport.kr/',
-    })
-    try:
-        # 먼저 메인 페이지 방문 (쿠키 획득)
-        session.get('https://scoreport.kr/', timeout=10)
-        resp = session.get('https://scoreport.kr/fear-greed', timeout=15)
-        resp.raise_for_status()
-        html = resp.text
-
-        # __NEXT_DATA__ JSON 파싱
-        m = re.search(r'id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
-        if m:
-            import json as _json
-            data = _json.loads(m.group(1))
-            # props에서 데이터 탐색
-            props = data.get('props', {}).get('pageProps', {})
-            
-            # 여러 키 시도
-            fg_total = None
-            fg_kospi  = None
-            fg_kosdaq = None
-            
-            for key in ['fearGreedTotal', 'totalScore', 'score', 'fearGreed']:
-                if key in props:
-                    fg_total = props[key]
-                    break
-            
-            for key in ['fearGreedKospi', 'kospiScore', 'kospi']:
-                if key in props:
-                    fg_kospi = props[key]
-                    break
-
-            for key in ['fearGreedKosdaq', 'kosdaqScore', 'kosdaq']:
-                if key in props:
-                    fg_kosdaq = props[key]
-                    break
-
-            print(f'  scoreport 수집: 전체={fg_total}, 코스피={fg_kospi}, 코스닥={fg_kosdaq}')
-            print(f'  props 키: {list(props.keys())[:10]}')
-            return {'total': fg_total, 'kospi': fg_kospi, 'kosdaq': fg_kosdaq}
-        
-        # __NEXT_DATA__ 없으면 HTML에서 직접 파싱
-        # 숫자 패턴들
-        patterns = [
-            (r'전체.*?(\d+)\s*(?:극단적\s*)?(?:공포|중립|탐욕)', 'total'),
-            (r'코스피.*?(\d+)\s*(?:극단적\s*)?(?:공포|중립|탐욕)', 'kospi'),
-        ]
-        result = {}
-        for pat, key in patterns:
-            m2 = re.search(pat, html, re.DOTALL)
-            if m2:
-                result[key] = int(m2.group(1))
-        
-        print(f'  HTML 파싱: {result}')
-        return result if result else None
-
-    except Exception as e:
-        print(f'  scoreport 수집 실패: {e}')
-        return None
-
-def fetch_yahoo(ticker, period='1y'):
-    """Yahoo Finance에서 일별 종가 가져오기"""
-    import urllib.request, json as _json, pandas as pd
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval=1d"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    try:
-        resp = urllib.request.urlopen(req, timeout=10)
-        data = _json.loads(resp.read())
-        result = data['chart']['result'][0]
-        closes = result['indicators']['quote'][0]['close']
-        timestamps = result['timestamp']
-        dates = pd.to_datetime(timestamps, unit='s').tz_localize('UTC').tz_convert('Asia/Seoul')
-        df = pd.DataFrame({'close': closes}, index=dates).dropna()
-        return df
-    except Exception as e:
-        print(f'  Yahoo fetch 실패 [{ticker}]: {e}')
-        return None
-
-def normalize_125(series):
-    arr = np.array(series[-125:])
-    mn, mx = arr.min(), arr.max()
-    if mx == mn:
-        return 50.0
-    return float(np.clip((arr[-1] - mn) / (mx - mn) * 100, 0, 100))
-
-def calc_fear_greed():
-    print('\n[공포탐욕지수] 계산 시작...')
-
-    # 먼저 scoreport.kr에서 직접 가져오기 시도
-    sp_data = fetch_scoreport()
-    
-    scores = {}
-    history = []
-
-    try:
-        df_ks = fetch_yahoo('^KS11', '2y')
-        if df_ks is not None and len(df_ks) >= 125:
-            closes = df_ks['close'].values
-            ma125   = np.mean(closes[-125:])
-            momentum_series = [closes[i] / np.mean(closes[max(0,i-125):i])
-                               for i in range(125, len(closes))]
-            if momentum_series:
-                mn125 = min(momentum_series[-125:])
-                mx125 = max(momentum_series[-125:])
-                cur   = momentum_series[-1]
-                scores['momentum'] = float(np.clip((cur - mn125) / (mx125 - mn125 + 1e-9) * 100, 0, 100))
-            else:
-                scores['momentum'] = 50.0
-            print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={closes[-1]:.0f}, MA125={ma125:.0f})')
-        else:
-            scores['momentum'] = 50.0
-
-        # 주가 강도
-        try:
-            end_today = date.today().strftime('%Y%m%d')
-            start_52w = (date.today() - timedelta(days=380)).strftime('%Y%m%d')
-            tickers = stock.get_market_ticker_list(end_today, market='KOSPI')
-            high52 = 0; low52 = 0
-            for t in tickers[:100]:
-                try:
-                    df_t = stock.get_market_ohlcv(start_52w, end_today, t)
-                    if df_t is None or len(df_t) < 2: continue
-                    c_today = df_t['종가'].iloc[-1]
-                    if c_today >= df_t['고가'].max() * 0.98: high52 += 1
-                    elif c_today <= df_t['저가'].min() * 1.02: low52 += 1
-                except: continue
-            total = high52 + low52
-            scores['strength'] = float(np.clip(high52 / total * 100, 0, 100)) if total > 0 else 50.0
-            print(f'  주가강도: {scores["strength"]:.1f} (신고가={high52}, 신저가={low52})')
-        except Exception as e:
-            print(f'  주가강도 오류: {e}')
-            scores['strength'] = 50.0
-
-        # 주가 폭
-        try:
-            end_today = date.today().strftime('%Y%m%d')
-            start_5d  = (date.today() - timedelta(days=7)).strftime('%Y%m%d')
-            tickers_today = stock.get_market_ticker_list(end_today, market='KOSPI')
-            up = 0; down = 0
-            for t in tickers_today[:200]:
-                try:
-                    df_t = stock.get_market_ohlcv(start_5d, end_today, t)
-                    if df_t is None or len(df_t) < 2: continue
-                    chg = df_t['종가'].iloc[-1] - df_t['종가'].iloc[-2]
-                    if chg > 0: up += 1
-                    elif chg < 0: down += 1
-                except: continue
-            total = up + down
-            scores['breadth'] = float(np.clip(up / total * 100, 0, 100)) if total > 0 else 50.0
-            print(f'  주가폭: {scores["breadth"]:.1f} (상승={up}, 하락={down})')
-        except Exception as e:
-            print(f'  주가폭 오류: {e}')
-            scores['breadth'] = 50.0
-
-        # 변동성 VKOSPI
-        df_vk = fetch_yahoo('^VKOSPI', '1y')
-        if df_vk is not None and len(df_vk) >= 50:
-            vk_vals = df_vk['close'].values
-            vk_inv  = [-v for v in vk_vals]
-            scores['volatility'] = normalize_125(vk_inv)
-            print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_vals[-1]:.2f})')
-        else:
-            scores['volatility'] = 50.0
-
-        # 안전자산 수요
-        try:
-            end_today = date.today().strftime('%Y%m%d')
-            start_30d = (date.today() - timedelta(days=45)).strftime('%Y%m%d')
-            df_ktb = stock.get_market_ohlcv(start_30d, end_today, '148070')
-            if df_ks is not None and df_ktb is not None and len(df_ktb) >= 20:
-                ks_vals   = df_ks['close'].values
-                kospi_ret = (ks_vals[-1] / ks_vals[-20] - 1) * 100
-                ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
-                diff = kospi_ret - ktb_ret
-                scores['safe_demand'] = float(np.clip((diff + 10) / 20 * 100, 0, 100))
-                print(f'  안전자산: {scores["safe_demand"]:.1f}')
-            else:
-                scores['safe_demand'] = 50.0
-        except Exception as e:
-            print(f'  안전자산 오류: {e}')
-            scores['safe_demand'] = 50.0
-
-        # 최종 점수: scoreport 성공 시 해당 수치 사용, 아니면 자체 계산
-        self_score = round(sum(scores.values()) / len(scores), 1)
-        
-        if sp_data and sp_data.get('total') is not None:
-            final = sp_data['total']
-            print(f'  ✓ scoreport 수치 사용: {final} (자체계산: {self_score})')
-            source = 'scoreport'
-        else:
-            final = self_score
-            print(f'  자체계산 수치 사용: {final}')
-            source = 'self'
-
-        # 30일 추이
-        if df_ks is not None and len(df_ks) >= 155:
-            ks_closes = df_ks['close'].values
-            for i in range(30, 0, -1):
-                idx = len(ks_closes) - i
-                if idx >= 125:
-                    sub = [ks_closes[j] / np.mean(ks_closes[max(0,j-125):j])
-                           for j in range(max(125,idx-124), idx+1)]
-                    if sub:
-                        mn2 = min(sub); mx2 = max(sub)
-                        cur2 = ks_closes[idx-1] / np.mean(ks_closes[idx-125:idx])
-                        day_score = float(np.clip((cur2-mn2)/(mx2-mn2+1e-9)*100, 0, 100))
-                        d = df_ks.index[idx-1].strftime('%m/%d')
-                        history.append({'date': d, 'score': round(day_score,1)})
-
-        return {
-            'score':   final,
-            'scores':  scores,
-            'history': history[-30:] if history else [],
-            'source':  source,
-            'sp_data': sp_data,
-        }
-
-    except Exception as e:
-        import traceback
-        print(f'[공포탐욕지수] 계산 실패: {e}')
-        print(traceback.format_exc())
-        return None
-
-
-
 # ── HTML 생성 ──
-def build_html(stocks, fg=None):
+def build_html(stocks):
     now = datetime.utcnow().strftime('%Y/%m/%d %H:%M UTC')
     palette = [
         ('#f04f5a','rgba(240,79,90,0.08)'),
@@ -385,150 +150,6 @@ def build_html(stocks, fg=None):
     labels_js  = json.dumps(labels)
     stocks_sub = ' vs '.join(s['name'] for s in stocks)
 
-    # ── 공포탐욕지수 HTML 블록 ──
-    if fg:
-        sc = fg['score']
-        sc_scores = fg['scores']
-        sc_hist   = fg['history']
-
-        def fg_color(v):
-            if v < 25: return '#ef4444'
-            if v < 45: return '#f97316'
-            if v < 55: return '#9ca3af'
-            if v < 75: return '#f59e0b'
-            return '#22c55e'
-
-        def fg_label(v):
-            if v < 25: return '극단적 공포'
-            if v < 45: return '공포'
-            if v < 55: return '중립'
-            if v < 75: return '탐욕'
-            return '극단적 탐욕'
-
-        def fg_badge_style(v):
-            if v < 25: return 'background:rgba(239,68,68,.12);color:#ef4444'
-            if v < 45: return 'background:rgba(249,115,22,.12);color:#f97316'
-            if v < 55: return 'background:rgba(156,163,175,.12);color:#9ca3af'
-            if v < 75: return 'background:rgba(245,158,11,.12);color:#f59e0b'
-            return 'background:rgba(34,197,94,.12);color:#22c55e'
-
-        fc = fg_color(sc)
-
-        ind_items = [
-            ('시장 모멘텀', '코스피가 125일 이동평균선 위에 있을수록 탐욕', sc_scores.get('momentum', 50)),
-            ('주가 강도',   '52주 신고가 종목이 신저가보다 많을수록 탐욕',  sc_scores.get('strength', 50)),
-            ('주가 폭',     '상승 종목 수가 하락 종목보다 많을수록 탐욕',    sc_scores.get('breadth', 50)),
-            ('변동성 VKOSPI','변동성 지수가 50일 평균보다 낮을수록 탐욕',   sc_scores.get('volatility', 50)),
-            ('안전자산 수요','코스피 수익률이 국고채보다 높을수록 탐욕',     sc_scores.get('safe_demand', 50)),
-        ]
-
-        ind_html = ''
-        for idx, (iname, idesc, ival) in enumerate(ind_items):
-            ic = fg_color(ival)
-            full = idx == 4
-            ind_html += (
-                f'<div class="ind-card{"  ind-full" if full else ""}">'
-                f'<div class="ind-name">{iname}</div>'
-                f'<div class="ind-desc">{idesc}</div>'
-                f'<div class="ind-bar-wrap"><div class="ind-bar" style="width:{ival:.0f}%;background:{ic}"></div></div>'
-                f'<div class="ind-score-row">'
-                f'<span class="ind-val" style="color:{ic}">{ival:.0f}</span>'
-                f'</div></div>'
-            )
-
-        hist_js   = json.dumps([h['score'] for h in sc_hist])
-        hist_lbl  = json.dumps([h['date']  for h in sc_hist])
-        hist_col  = json.dumps([fg_color(h['score']) for h in sc_hist])
-
-        fg_block = f"""
-<div class="fg-section">
-  <div class="fg-header">
-    <span class="fg-title">코스피 공포탐욕지수</span>
-    <span class="fg-updated">{now[:10]} 기준</span>
-  </div>
-
-  <div class="fg-gauge-wrap">
-    <div style="position:relative;width:200px;height:105px;margin:0 auto">
-      <canvas id="gaugeChart" role="img" aria-label="공포탐욕지수 {sc}점 {fg_label(sc)} 구간">{sc}점 {fg_label(sc)}</canvas>
-    </div>
-    <div class="fg-score" style="color:{fc}">{sc}</div>
-    <div class="fg-badge" style="{fg_badge_style(sc)}">{fg_label(sc)}</div>
-  </div>
-
-  <div class="fg-hist-title">30일 추이</div>
-  <div style="position:relative;width:100%;height:55px;margin-bottom:12px">
-    <canvas id="histChart" role="img" aria-label="30일 공포탐욕지수 추이">30일 추이</canvas>
-  </div>
-
-  <div class="ind-grid">{ind_html}</div>
-
-  <div class="fg-zones">
-    <div class="zone-row" style="background:rgba(239,68,68,.05)">
-      <div class="zone-bar" style="background:#ef4444"></div>
-      <div><div class="zone-range">0~24</div><div class="zone-name" style="color:#ef4444">극단적 공포</div><div class="zone-desc">패닉 셀링 구간. 역발상 매수 기회일 수 있으나 추가 하락 가능</div></div>
-    </div>
-    <div class="zone-row" style="background:rgba(249,115,22,.05)">
-      <div class="zone-bar" style="background:#f97316"></div>
-      <div><div class="zone-range">25~44</div><div class="zone-name" style="color:#f97316">공포</div><div class="zone-desc">매도 압력 우세. 중장기 분할 매수 검토 구간</div></div>
-    </div>
-    <div class="zone-row" style="background:rgba(107,114,128,.05)">
-      <div class="zone-bar" style="background:#6b7280"></div>
-      <div><div class="zone-range">45~54</div><div class="zone-name" style="color:#9ca3af">중립</div><div class="zone-desc">방향성 탐색 구간. 변동성 낮고 추세 전환 신호 주시</div></div>
-    </div>
-    <div class="zone-row" style="background:rgba(245,158,11,.05)">
-      <div class="zone-bar" style="background:#f59e0b"></div>
-      <div><div class="zone-range">55~74</div><div class="zone-name" style="color:#f59e0b">탐욕</div><div class="zone-desc">상승 모멘텀 강함. 수익 실현 및 리스크 관리 필요</div></div>
-    </div>
-    <div class="zone-row" style="background:rgba(34,197,94,.05)">
-      <div class="zone-bar" style="background:#22c55e"></div>
-      <div><div class="zone-range">75~100</div><div class="zone-name" style="color:#22c55e">극단적 탐욕</div><div class="zone-desc">버블 과열 구간. FOMO 매수 폭증. 수익 실현 및 현금 비중 확대 권장</div></div>
-    </div>
-  </div>
-  <div class="fg-note">* 5개 지표 단순 평균 · 참고용 지표 · 투자 결정의 단독 근거로 사용 금지</div>
-</div>
-"""
-        fg_chart_js = f"""
-new Chart(document.getElementById('gaugeChart'),{{
-  type:'doughnut',
-  data:{{datasets:[{{
-    data:[{sc},100-{sc}],
-    backgroundColor:['{fc}','rgba(30,45,69,0.8)'],
-    borderWidth:0,circumference:180,rotation:270
-  }}]}},
-  options:{{responsive:true,maintainAspectRatio:false,cutout:'72%',
-    plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}}}}
-}});
-
-const histData={hist_js};
-const histLabels={hist_lbl};
-const histColors={hist_col};
-new Chart(document.getElementById('histChart'),{{
-  type:'line',
-  data:{{
-    labels:histLabels,
-    datasets:[{{
-      data:histData,
-      borderColor:'{fc}',
-      backgroundColor:'rgba(245,158,11,0.05)',
-      borderWidth:1.5,pointRadius:0,tension:0.3,fill:true,
-      segment:{{borderColor:ctx=>histColors[ctx.p1DataIndex]||'{fc}'}}
-    }}]
-  }},
-  options:{{responsive:true,maintainAspectRatio:false,
-    plugins:{{legend:{{display:false}},tooltip:{{
-      mode:'index',intersect:false,
-      backgroundColor:'#1a2438',borderColor:'#2a3f5f',borderWidth:1,
-      titleColor:'#6b7a99',bodyColor:'#e2e8f0',
-      callbacks:{{label:i=>` ${{i.raw}}점`}}
-    }}}},
-    scales:{{x:{{display:false}},y:{{min:0,max:100,display:false}}}}
-  }}
-}});
-"""
-    else:
-        fg_block = ''
-        fg_chart_js = ''
-
     return f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -591,32 +212,6 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .rate-cell:hover{{border-color:rgba(255,255,255,.15)}}
 .disclaimer{{font-size:10px;color:#3a4a5a;font-family:var(--mono);margin-top:8px;text-align:right}}
 .copyright{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)}}
-
-/* ── 공포탐욕지수 ── */
-.fg-section{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px}}
-.fg-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}}
-.fg-title{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.8px}}
-.fg-updated{{font-size:10px;color:var(--muted);font-family:var(--mono)}}
-.fg-gauge-wrap{{display:flex;flex-direction:column;align-items:center;margin-bottom:12px}}
-.fg-score{{font-size:30px;font-weight:600;font-family:var(--mono);margin:2px 0}}
-.fg-badge{{font-size:11px;padding:3px 12px;border-radius:12px;font-family:var(--mono);margin-bottom:4px}}
-.fg-hist-title{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}}
-.ind-grid{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}}
-.ind-card{{background:var(--bg);border-radius:8px;padding:9px 10px}}
-.ind-full{{grid-column:span 2}}
-.ind-name{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px}}
-.ind-desc{{font-size:10px;color:#8a9ab5;line-height:1.5;margin-bottom:5px}}
-.ind-bar-wrap{{height:3px;background:#1e2d45;border-radius:2px;overflow:hidden;margin-bottom:3px}}
-.ind-bar{{height:100%;border-radius:2px}}
-.ind-score-row{{display:flex;justify-content:space-between}}
-.ind-val{{font-size:12px;font-weight:600;font-family:var(--mono)}}
-.fg-zones{{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}}
-.zone-row{{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px}}
-.zone-bar{{width:3px;min-height:36px;border-radius:2px;flex-shrink:0;margin-top:2px}}
-.zone-range{{font-size:9px;color:var(--muted);font-family:var(--mono);margin-bottom:1px}}
-.zone-name{{font-size:11px;font-weight:600;font-family:var(--mono);margin-bottom:2px}}
-.zone-desc{{font-size:10px;color:#8a9ab5;line-height:1.4}}
-.fg-note{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center}}
 </style>
 </head>
 <body>
@@ -655,8 +250,6 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
   <div class="rate-table">{rate_rows_html}</div>
   <div class="disclaimer">* 정규장 종가 기준 · 시간외거래 미반영 · 데이터 오류 가능성 있음</div>
 </div>
-
-{fg_block}
 
 <script>
 const labels  = {labels_js};
@@ -833,8 +426,6 @@ function setTab(t){{
   document.querySelectorAll('.tab').forEach((el,i)=>
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
-
-{fg_chart_js}
 </script>
 <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
 </body>
@@ -866,12 +457,9 @@ if __name__ == '__main__':
         print('오류: 최소 2개 종목 필요')
         sys.exit(1)
 
-    # 공포탐욕지수 계산
-    fg = calc_fear_greed()
-
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'etf_dashboard.html')
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(build_html(stocks, fg))
+        f.write(build_html(stocks))
 
     print(f'\n✓ 완료: {out}')
     for s in stocks:
