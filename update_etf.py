@@ -211,7 +211,10 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .rate-cell.selected .rc-d{{color:var(--text)}}
 .rate-cell:hover{{border-color:rgba(255,255,255,.15)}}
 .disclaimer{{font-size:10px;color:#3a4a5a;font-family:var(--mono);margin-top:8px;text-align:right}}
-.copyright{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)}}
+.ext-links{{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:20px;padding:12px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface)}}
+.ext-links a{{font-size:11px;font-family:var(--mono);color:var(--muted);text-decoration:none;padding:5px 12px;border-radius:6px;border:1px solid var(--border);transition:all .15s}}
+.ext-links a:hover{{color:var(--text);border-color:#2a3f5f;background:var(--bg)}}
+.copyright{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)}}
 </style>
 </head>
 <body>
@@ -427,6 +430,11 @@ function setTab(t){{
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
 </script>
+<div class="ext-links">
+  <a href="https://feargreed.co.kr/kospi-heatmap/" target="_blank" rel="noopener">KOSPI 히트맵</a>
+  <a href="https://feargreed.co.kr/" target="_blank" rel="noopener">공포탐욕지수</a>
+  <a href="https://scoreport.kr/" target="_blank" rel="noopener">시장정보</a>
+</div>
 <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
 </body>
 </html>"""
