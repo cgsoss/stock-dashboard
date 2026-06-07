@@ -78,10 +78,9 @@ def calc_fear_greed():
 
     try:
         # ── 지표1: 시장 모멘텀 (코스피 vs 125일 이동평균) ──
-        df_kospi = stock.get_index_ohlcv(start_180, today, '1001')  # 코스피
-        # 컬럼명 확인 후 종가 추출
-        close_col = '종가' if '종가' in df_kospi.columns else df_kospi.columns[-2]
-        closes = df_kospi[close_col].values
+        # 코스피 지수 대신 코스피200 ETF(069500)로 모멘텀 계산
+        df_kospi = stock.get_market_ohlcv(start_180, today, '069500')
+        closes = df_kospi['종가'].values
         if len(closes) >= 125:
             ma125 = np.mean(closes[-125:])
             current = closes[-1]
@@ -141,9 +140,9 @@ def calc_fear_greed():
 
         # ── 지표4: 변동성 VKOSPI vs 50일 이동평균 ──
         try:
-            df_vk = stock.get_index_ohlcv(start_180, today, '1005')  # VKOSPI
-            vk_close_col = '종가' if '종가' in df_vk.columns else df_vk.columns[-2]
-            vk_closes = df_vk[vk_close_col].values
+            # VKOSPI 대신 변동성 지표로 고가-저가 평균 범위 사용
+            df_vk = stock.get_market_ohlcv(start_180, today, '069500')
+            vk_closes = ((df_vk['고가'] - df_vk['저가']) / df_vk['종가'] * 100).values
             if len(vk_closes) >= 50:
                 vk_now = vk_closes[-1]
                 vk_ma50 = np.mean(vk_closes[-50:])
@@ -158,13 +157,12 @@ def calc_fear_greed():
 
         # ── 지표5: 안전자산 수요 (코스피 20일 수익률 vs 국고채) ──
         try:
-            df_ktb = stock.get_index_ohlcv(start_30, today, '5000')  # KTB3Y 인덱스
-            df_ksp = stock.get_index_ohlcv(start_30, today, '1001')
-            ksp_col = '종가' if '종가' in df_ksp.columns else df_ksp.columns[-2]
-            ktb_col = '종가' if '종가' in df_ktb.columns else df_ktb.columns[-2]
+            # 안전자산 수요: 코스피ETF vs 국채ETF(148070 KODEX국고채3년)
+            df_ksp = stock.get_market_ohlcv(start_30, today, '069500')
+            df_ktb = stock.get_market_ohlcv(start_30, today, '148070')
             if len(df_ktb) >= 20 and len(df_ksp) >= 20:
-                kospi_ret = (df_ksp[ksp_col].iloc[-1] / df_ksp[ksp_col].iloc[-20] - 1) * 100
-                ktb_ret   = (df_ktb[ktb_col].iloc[-1] / df_ktb[ktb_col].iloc[-20] - 1) * 100
+                kospi_ret = (df_ksp['종가'].iloc[-1] / df_ksp['종가'].iloc[-20] - 1) * 100
+                ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
                 diff = kospi_ret - ktb_ret
                 scores['safe_demand'] = float(np.clip((diff + 10) / 20 * 100, 0, 100))
                 print(f'  안전자산: {scores["safe_demand"]:.1f} (코스피20d={kospi_ret:.2f}%, 채권={ktb_ret:.2f}%)')
@@ -188,6 +186,17 @@ def calc_fear_greed():
                     cur = closes[idx-1]
                     raw = (cur - ma) / ma * 100
                     day_score = float(np.clip((raw + 20) / 40 * 100, 0, 100))
+                    d = df_kospi.index[idx-1].strftime('%m/%d')
+                    history.append({'date': d, 'score': round(day_score, 1)})
+        elif len(closes) >= 30:
+            for i in range(min(30, len(closes)-1), 0, -1):
+                idx = len(closes) - i
+                if idx >= 5:
+                    sub = closes[max(0,idx-20):idx]
+                    ma = np.mean(sub)
+                    cur = closes[idx-1]
+                    raw = (cur - ma) / ma * 100
+                    day_score = float(np.clip((raw + 10) / 20 * 100, 0, 100))
                     d = df_kospi.index[idx-1].strftime('%m/%d')
                     history.append({'date': d, 'score': round(day_score, 1)})
 
