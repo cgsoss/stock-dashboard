@@ -67,41 +67,53 @@ def add_changes(rows):
     return rows
 
 # ── 공포탐욕지수 계산 ──
-def calc_fear_greed():
-    today = date.today().strftime('%Y%m%d')
-    start_180 = (date.today() - timedelta(days=300)).strftime('%Y%m%d')  # 여유있게 300일
-    start_30  = (date.today() - timedelta(days=60)).strftime('%Y%m%d')
+def fetch_yahoo(ticker, period='6mo'):
+    """Yahoo Finance에서 일별 종가 가져오기"""
+    import urllib.request, json as _json
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval=1d"
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = _json.loads(resp.read())
+        result = data['chart']['result'][0]
+        closes = result['indicators']['quote'][0]['close']
+        timestamps = result['timestamp']
+        import pandas as pd
+        dates = pd.to_datetime(timestamps, unit='s').tz_localize('UTC').tz_convert('Asia/Seoul')
+        df = pd.DataFrame({'close': closes}, index=dates)
+        df = df.dropna()
+        return df
+    except Exception as e:
+        print(f'  Yahoo fetch 실패 [{ticker}]: {e}')
+        return None
 
+def calc_fear_greed():
     print('\n[공포탐욕지수] 계산 시작...')
     scores = {}
-    history = []  # 최근 30일 일별 점수
+    history = []
 
     try:
         # ── 지표1: 시장 모멘텀 (코스피 vs 125일 이동평균) ──
-        # 코스피 지수 대신 코스피200 ETF(069500)로 모멘텀 계산
-        df_kospi = stock.get_market_ohlcv(start_180, today, '069500')
-        closes = df_kospi['종가'].values
-        if len(closes) >= 125:
-            ma125 = np.mean(closes[-125:])
+        df_ks = fetch_yahoo('^KS11', '1y')
+        if df_ks is not None and len(df_ks) >= 125:
+            closes = df_ks['close'].values
+            ma125   = np.mean(closes[-125:])
             current = closes[-1]
             raw = (current - ma125) / ma125 * 100
-            scores['momentum'] = float(np.clip((raw + 20) / 40 * 100, 0, 100))
+            scores['momentum'] = float(np.clip((raw + 15) / 30 * 100, 0, 100))
             print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={current:.0f}, MA125={ma125:.0f})')
         else:
             scores['momentum'] = 50.0
 
         # ── 지표2: 주가 강도 (52주 신고가 vs 신저가) ──
         try:
-            df_market = stock.get_market_ohlcv(start_180, today, '1001') if False else None
-            # 코스피 전체 종목 신고가/신저가 비율
-            tickers = stock.get_market_ticker_list(today, market='KOSPI')
-            high52 = 0; low52 = 0
+            tickers = stock.get_market_ticker_list(date.today().strftime('%Y%m%d'), market='KOSPI')
             start_52w = (date.today() - timedelta(days=365)).strftime('%Y%m%d')
-            # 샘플링: 전체 대신 주요 100개만 (속도 문제)
-            sample = tickers[:80]
-            for t in sample:
+            end_today = date.today().strftime('%Y%m%d')
+            high52 = 0; low52 = 0
+            for t in tickers[:100]:
                 try:
-                    df_t = stock.get_market_ohlcv(start_52w, today, t)
+                    df_t = stock.get_market_ohlcv(start_52w, end_today, t)
                     if df_t is None or len(df_t) < 2: continue
                     c_today = df_t['종가'].iloc[-1]
                     h_52 = df_t['고가'].max()
@@ -118,14 +130,13 @@ def calc_fear_greed():
 
         # ── 지표3: 주가 폭 (상승/하락 종목수 비율) ──
         try:
-            df_adv = stock.get_market_ohlcv(today, today, '1001')
-            # 시장 전체 등락 데이터
-            tickers_today = stock.get_market_ticker_list(today, market='KOSPI')
+            tickers_today = stock.get_market_ticker_list(date.today().strftime('%Y%m%d'), market='KOSPI')
+            start_5d = (date.today() - timedelta(days=7)).strftime('%Y%m%d')
+            end_today = date.today().strftime('%Y%m%d')
             up = 0; down = 0
-            for t in tickers_today[:200]:  # 200개 샘플
+            for t in tickers_today[:200]:
                 try:
-                    df_t = stock.get_market_ohlcv(
-                        (date.today() - timedelta(days=5)).strftime('%Y%m%d'), today, t)
+                    df_t = stock.get_market_ohlcv(start_5d, end_today, t)
                     if df_t is None or len(df_t) < 2: continue
                     chg = df_t['종가'].iloc[-1] - df_t['종가'].iloc[-2]
                     if chg > 0: up += 1
@@ -138,30 +149,35 @@ def calc_fear_greed():
             print(f'  주가폭 오류: {e}')
             scores['breadth'] = 50.0
 
-        # ── 지표4: 변동성 VKOSPI vs 50일 이동평균 ──
-        try:
-            # VKOSPI 대신 변동성 지표로 고가-저가 평균 범위 사용
-            df_vk = stock.get_market_ohlcv(start_180, today, '069500')
-            vk_closes = ((df_vk['고가'] - df_vk['저가']) / df_vk['종가'] * 100).values
-            if len(vk_closes) >= 50:
-                vk_now = vk_closes[-1]
-                vk_ma50 = np.mean(vk_closes[-50:])
-                raw = (vk_ma50 - vk_now) / vk_ma50 * 100  # 역방향
-                scores['volatility'] = float(np.clip((raw + 30) / 60 * 100, 0, 100))
-                print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_now:.2f}, MA50={vk_ma50:.2f})')
+        # ── 지표4: 변동성 (VKOSPI vs 50일 이동평균) ──
+        # ^VKOSPI Yahoo Finance
+        df_vk = fetch_yahoo('^VKOSPI', '1y')
+        if df_vk is not None and len(df_vk) >= 50:
+            vk_vals = df_vk['close'].values
+            vk_now  = vk_vals[-1]
+            vk_ma50 = np.mean(vk_vals[-50:])
+            raw = (vk_ma50 - vk_now) / vk_ma50 * 100  # 역방향
+            scores['volatility'] = float(np.clip((raw + 30) / 60 * 100, 0, 100))
+            print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_now:.2f}, MA50={vk_ma50:.2f})')
+        else:
+            # VKOSPI 안되면 코스피 일중 변동폭으로 대체
+            if df_ks is not None and len(df_ks) >= 50:
+                df_ks2 = fetch_yahoo('^KS11', '1y')
+                scores['volatility'] = 50.0
             else:
                 scores['volatility'] = 50.0
-        except Exception as e:
-            print(f'  변동성 오류: {e}')
-            scores['volatility'] = 50.0
+            print(f'  변동성: VKOSPI 미수집, 기본값 사용')
 
-        # ── 지표5: 안전자산 수요 (코스피 20일 수익률 vs 국고채) ──
+        # ── 지표5: 안전자산 수요 (코스피 vs 국고채 20일 수익률) ──
+        # KRX 국고채 3년 지수 대신 KODEX국고채3년(148070) 사용
         try:
-            # 안전자산 수요: 코스피ETF vs 국채ETF(148070 KODEX국고채3년)
-            df_ksp = stock.get_market_ohlcv(start_30, today, '069500')
-            df_ktb = stock.get_market_ohlcv(start_30, today, '148070')
-            if len(df_ktb) >= 20 and len(df_ksp) >= 20:
-                kospi_ret = (df_ksp['종가'].iloc[-1] / df_ksp['종가'].iloc[-20] - 1) * 100
+            end_today = date.today().strftime('%Y%m%d')
+            start_30d = (date.today() - timedelta(days=45)).strftime('%Y%m%d')
+            df_ktb = stock.get_market_ohlcv(start_30d, end_today, '148070')
+            if df_ks is not None and df_ktb is not None and len(df_ktb) >= 20:
+                # 코스피 20일 수익률
+                ks_vals = df_ks['close'].values
+                kospi_ret = (ks_vals[-1] / ks_vals[-20] - 1) * 100
                 ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
                 diff = kospi_ret - ktb_ret
                 scores['safe_demand'] = float(np.clip((diff + 10) / 20 * 100, 0, 100))
@@ -172,37 +188,27 @@ def calc_fear_greed():
             print(f'  안전자산 오류: {e}')
             scores['safe_demand'] = 50.0
 
-        # ── 최종 점수 (5개 평균) ──
+        # ── 최종 점수 ──
         final = round(sum(scores.values()) / len(scores), 1)
         print(f'  최종 공포탐욕지수: {final}')
 
-        # ── 30일 추이 (코스피 모멘텀 기반 간이 계산) ──
-        if len(closes) >= 155:
+        # ── 30일 추이 ──
+        if df_ks is not None and len(df_ks) >= 155:
+            ks_closes = df_ks['close'].values
             for i in range(30, 0, -1):
-                idx = len(closes) - i
+                idx = len(ks_closes) - i
                 if idx >= 125:
-                    sub = closes[idx-125:idx]
-                    ma = np.mean(sub)
-                    cur = closes[idx-1]
+                    sub = ks_closes[idx-125:idx]
+                    ma  = np.mean(sub)
+                    cur = ks_closes[idx-1]
                     raw = (cur - ma) / ma * 100
-                    day_score = float(np.clip((raw + 20) / 40 * 100, 0, 100))
-                    d = df_kospi.index[idx-1].strftime('%m/%d')
-                    history.append({'date': d, 'score': round(day_score, 1)})
-        elif len(closes) >= 30:
-            for i in range(min(30, len(closes)-1), 0, -1):
-                idx = len(closes) - i
-                if idx >= 5:
-                    sub = closes[max(0,idx-20):idx]
-                    ma = np.mean(sub)
-                    cur = closes[idx-1]
-                    raw = (cur - ma) / ma * 100
-                    day_score = float(np.clip((raw + 10) / 20 * 100, 0, 100))
-                    d = df_kospi.index[idx-1].strftime('%m/%d')
+                    day_score = float(np.clip((raw + 15) / 30 * 100, 0, 100))
+                    d = df_ks.index[idx-1].strftime('%m/%d')
                     history.append({'date': d, 'score': round(day_score, 1)})
 
         return {
-            'score': final,
-            'scores': scores,
+            'score':   final,
+            'scores':  scores,
             'history': history[-30:] if history else []
         }
 
