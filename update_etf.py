@@ -67,9 +67,8 @@ def add_changes(rows):
     return rows
 
 # ── 공포탐욕지수 계산 ──
-def fetch_yahoo(ticker, period='6mo'):
-    """Yahoo Finance에서 일별 종가 가져오기"""
-    import urllib.request, json as _json
+def fetch_yahoo(ticker, period='1y'):
+    import urllib.request, json as _json, pandas as pd
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?range={period}&interval=1d"
     req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
     try:
@@ -78,14 +77,20 @@ def fetch_yahoo(ticker, period='6mo'):
         result = data['chart']['result'][0]
         closes = result['indicators']['quote'][0]['close']
         timestamps = result['timestamp']
-        import pandas as pd
         dates = pd.to_datetime(timestamps, unit='s').tz_localize('UTC').tz_convert('Asia/Seoul')
-        df = pd.DataFrame({'close': closes}, index=dates)
-        df = df.dropna()
+        df = pd.DataFrame({'close': closes}, index=dates).dropna()
         return df
     except Exception as e:
         print(f'  Yahoo fetch 실패 [{ticker}]: {e}')
         return None
+
+def normalize_125(series):
+    """feargreed.co.kr 동일 방식: 125거래일 내 min/max 기준 정규화"""
+    arr = np.array(series[-125:])
+    mn, mx = arr.min(), arr.max()
+    if mx == mn:
+        return 50.0
+    return float(np.clip((arr[-1] - mn) / (mx - mn) * 100, 0, 100))
 
 def calc_fear_greed():
     print('\n[공포탐욕지수] 계산 시작...')
@@ -94,22 +99,29 @@ def calc_fear_greed():
 
     try:
         # ── 지표1: 시장 모멘텀 (코스피 vs 125일 이동평균) ──
-        df_ks = fetch_yahoo('^KS11', '1y')
+        df_ks = fetch_yahoo('^KS11', '2y')
         if df_ks is not None and len(df_ks) >= 125:
             closes = df_ks['close'].values
             ma125   = np.mean(closes[-125:])
-            current = closes[-1]
-            raw = (current - ma125) / ma125 * 100
-            scores['momentum'] = float(np.clip((raw + 15) / 30 * 100, 0, 100))
-            print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={current:.0f}, MA125={ma125:.0f})')
+            # 모멘텀 = 코스피 / MA125 비율의 125일 정규화
+            momentum_series = [closes[i] / np.mean(closes[max(0,i-125):i]) 
+                               for i in range(125, len(closes))]
+            if momentum_series:
+                mn, mx = min(momentum_series), max(momentum_series[-125:])
+                cur = momentum_series[-1]
+                scores['momentum'] = float(np.clip((cur - min(momentum_series[-125:])) / 
+                                                    (mx - min(momentum_series[-125:]) + 1e-9) * 100, 0, 100))
+            else:
+                scores['momentum'] = 50.0
+            print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={closes[-1]:.0f}, MA125={ma125:.0f})')
         else:
             scores['momentum'] = 50.0
 
         # ── 지표2: 주가 강도 (52주 신고가 vs 신저가) ──
         try:
-            tickers = stock.get_market_ticker_list(date.today().strftime('%Y%m%d'), market='KOSPI')
-            start_52w = (date.today() - timedelta(days=365)).strftime('%Y%m%d')
             end_today = date.today().strftime('%Y%m%d')
+            start_52w = (date.today() - timedelta(days=380)).strftime('%Y%m%d')
+            tickers = stock.get_market_ticker_list(end_today, market='KOSPI')
             high52 = 0; low52 = 0
             for t in tickers[:100]:
                 try:
@@ -122,17 +134,19 @@ def calc_fear_greed():
                     elif c_today <= l_52 * 1.02: low52 += 1
                 except: continue
             total = high52 + low52
-            scores['strength'] = float(high52 / total * 100) if total > 0 else 50.0
+            raw_ratio = high52 / total if total > 0 else 0.5
+            # 125일 히스토리 없으니 단순 정규화 (0.5 기준 ±0.5)
+            scores['strength'] = float(np.clip(raw_ratio * 100, 0, 100))
             print(f'  주가강도: {scores["strength"]:.1f} (신고가={high52}, 신저가={low52})')
         except Exception as e:
             print(f'  주가강도 오류: {e}')
             scores['strength'] = 50.0
 
-        # ── 지표3: 주가 폭 (상승/하락 종목수 비율) ──
+        # ── 지표3: 주가 폭 (상승/하락 종목수) ──
         try:
-            tickers_today = stock.get_market_ticker_list(date.today().strftime('%Y%m%d'), market='KOSPI')
-            start_5d = (date.today() - timedelta(days=7)).strftime('%Y%m%d')
             end_today = date.today().strftime('%Y%m%d')
+            start_5d  = (date.today() - timedelta(days=7)).strftime('%Y%m%d')
+            tickers_today = stock.get_market_ticker_list(end_today, market='KOSPI')
             up = 0; down = 0
             for t in tickers_today[:200]:
                 try:
@@ -143,40 +157,31 @@ def calc_fear_greed():
                     elif chg < 0: down += 1
                 except: continue
             total = up + down
-            scores['breadth'] = float(up / total * 100) if total > 0 else 50.0
+            scores['breadth'] = float(np.clip(up / total * 100, 0, 100)) if total > 0 else 50.0
             print(f'  주가폭: {scores["breadth"]:.1f} (상승={up}, 하락={down})')
         except Exception as e:
             print(f'  주가폭 오류: {e}')
             scores['breadth'] = 50.0
 
-        # ── 지표4: 변동성 (VKOSPI vs 50일 이동평균) ──
-        # ^VKOSPI Yahoo Finance
+        # ── 지표4: 변동성 VKOSPI vs 50일 이동평균 (역방향) ──
         df_vk = fetch_yahoo('^VKOSPI', '1y')
         if df_vk is not None and len(df_vk) >= 50:
             vk_vals = df_vk['close'].values
-            vk_now  = vk_vals[-1]
-            vk_ma50 = np.mean(vk_vals[-50:])
-            raw = (vk_ma50 - vk_now) / vk_ma50 * 100  # 역방향
-            scores['volatility'] = float(np.clip((raw + 30) / 60 * 100, 0, 100))
-            print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_now:.2f}, MA50={vk_ma50:.2f})')
+            # VKOSPI 높을수록 공포 → 역방향 정규화
+            vk_inv = [-v for v in vk_vals]  # 부호 뒤집기
+            scores['volatility'] = normalize_125(vk_inv)
+            print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_vals[-1]:.2f})')
         else:
-            # VKOSPI 안되면 코스피 일중 변동폭으로 대체
-            if df_ks is not None and len(df_ks) >= 50:
-                df_ks2 = fetch_yahoo('^KS11', '1y')
-                scores['volatility'] = 50.0
-            else:
-                scores['volatility'] = 50.0
-            print(f'  변동성: VKOSPI 미수집, 기본값 사용')
+            scores['volatility'] = 50.0
+            print(f'  변동성: VKOSPI 미수집')
 
         # ── 지표5: 안전자산 수요 (코스피 vs 국고채 20일 수익률) ──
-        # KRX 국고채 3년 지수 대신 KODEX국고채3년(148070) 사용
         try:
             end_today = date.today().strftime('%Y%m%d')
             start_30d = (date.today() - timedelta(days=45)).strftime('%Y%m%d')
             df_ktb = stock.get_market_ohlcv(start_30d, end_today, '148070')
             if df_ks is not None and df_ktb is not None and len(df_ktb) >= 20:
-                # 코스피 20일 수익률
-                ks_vals = df_ks['close'].values
+                ks_vals  = df_ks['close'].values
                 kospi_ret = (ks_vals[-1] / ks_vals[-20] - 1) * 100
                 ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
                 diff = kospi_ret - ktb_ret
@@ -191,6 +196,7 @@ def calc_fear_greed():
         # ── 최종 점수 ──
         final = round(sum(scores.values()) / len(scores), 1)
         print(f'  최종 공포탐욕지수: {final}')
+        print(f'  지표별: {scores}')
 
         # ── 30일 추이 ──
         if df_ks is not None and len(df_ks) >= 155:
@@ -198,25 +204,25 @@ def calc_fear_greed():
             for i in range(30, 0, -1):
                 idx = len(ks_closes) - i
                 if idx >= 125:
-                    sub = ks_closes[idx-125:idx]
-                    ma  = np.mean(sub)
-                    cur = ks_closes[idx-1]
-                    raw = (cur - ma) / ma * 100
-                    day_score = float(np.clip((raw + 15) / 30 * 100, 0, 100))
-                    d = df_ks.index[idx-1].strftime('%m/%d')
-                    history.append({'date': d, 'score': round(day_score, 1)})
+                    sub_momentum = [ks_closes[j] / np.mean(ks_closes[max(0,j-125):j])
+                                    for j in range(max(125, idx-124), idx+1)]
+                    if sub_momentum:
+                        mn2 = min(sub_momentum)
+                        mx2 = max(sub_momentum)
+                        cur2 = ks_closes[idx-1] / np.mean(ks_closes[idx-125:idx])
+                        day_score = float(np.clip((cur2 - mn2) / (mx2 - mn2 + 1e-9) * 100, 0, 100))
+                        d = df_ks.index[idx-1].strftime('%m/%d')
+                        history.append({'date': d, 'score': round(day_score, 1)})
 
-        return {
-            'score':   final,
-            'scores':  scores,
-            'history': history[-30:] if history else []
-        }
+        return {'score': final, 'scores': scores, 'history': history[-30:] if history else []}
 
     except Exception as e:
         import traceback
         print(f'[공포탐욕지수] 계산 실패: {e}')
         print(traceback.format_exc())
         return None
+
+
 
 # ── HTML 생성 ──
 def build_html(stocks, fg=None):
