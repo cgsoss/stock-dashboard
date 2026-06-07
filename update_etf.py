@@ -9,6 +9,7 @@ import json, os, sys, csv, io
 import requests
 from datetime import datetime, date, timedelta
 from pykrx import stock
+import numpy as np
 
 # ── Google Sheets에서 종목 목록 읽기 ──
 def fetch_config(sheet_id):
@@ -23,45 +24,34 @@ def fetch_config(sheet_id):
         start  = row.get('시작일', '').strip().replace('. ', '-').replace('.', '-')
         display = row.get('표시', '').strip().upper()
         if code and name and start and display == 'Y':
-            # 날짜 형식 정리: 2026. 01. 01 → 2026-01-01
             import re
             start = re.sub(r'[^\d]', '-', start)
             start = re.sub(r'-+', '-', start).strip('-')
-            short = row.get('축약명', '').strip() or name  # 없으면 정식명 사용
+            short = row.get('축약명', '').strip() or name
             items.append({'code': code, 'name': name, 'short': short, 'start': start})
     print(f"[설정] {len(items)}개 종목 (Y): {[x['code']+' '+x['name'] for x in items]}")
     return items
 
 # ── pykrx로 일별 시세 가져오기 ──
 def fetch_pykrx(code, start_date_str):
-    """
-    start_date_str: 'YYYY-MM-DD'
-    데이터가 없는 구간(상장 전)은 자동으로 건너뜀
-    반환: [{'date': 'YYYY/MM/DD', 'close': int}, ...]
-    """
     start = start_date_str.replace('-', '')
     end   = date.today().strftime('%Y%m%d')
-
     try:
         df = stock.get_market_ohlcv(start, end, code)
     except Exception as e:
         print(f'  [{code}] pykrx 오류: {e}')
         return []
-
     if df is None or df.empty:
         print(f'  [{code}] 데이터 없음')
         return []
-
     rows = []
     for dt, row in df.iterrows():
         c = int(row['종가'])
         if c > 0:
             rows.append({'date': dt.strftime('%Y/%m/%d'), 'close': c})
-
     if not rows:
         print(f'  [{code}] 유효 데이터 없음')
         return []
-
     rows.sort(key=lambda x: x['date'])
     actual_start = rows[0]['date']
     req_start    = start_date_str.replace('-', '/')
@@ -76,8 +66,138 @@ def add_changes(rows):
         r['change'] = 0.0 if i == 0 else round((r['close'] / rows[i-1]['close'] - 1) * 100, 2)
     return rows
 
+# ── 공포탐욕지수 계산 ──
+def calc_fear_greed():
+    today = date.today().strftime('%Y%m%d')
+    start_180 = (date.today() - timedelta(days=300)).strftime('%Y%m%d')  # 여유있게 300일
+    start_30  = (date.today() - timedelta(days=60)).strftime('%Y%m%d')
+
+    print('\n[공포탐욕지수] 계산 시작...')
+    scores = {}
+    history = []  # 최근 30일 일별 점수
+
+    try:
+        # ── 지표1: 시장 모멘텀 (코스피 vs 125일 이동평균) ──
+        df_kospi = stock.get_index_ohlcv(start_180, today, '1001')  # 코스피
+        closes = df_kospi['종가'].values
+        if len(closes) >= 125:
+            ma125 = np.mean(closes[-125:])
+            current = closes[-1]
+            raw = (current - ma125) / ma125 * 100
+            scores['momentum'] = float(np.clip((raw + 20) / 40 * 100, 0, 100))
+            print(f'  모멘텀: {scores["momentum"]:.1f} (코스피={current:.0f}, MA125={ma125:.0f})')
+        else:
+            scores['momentum'] = 50.0
+
+        # ── 지표2: 주가 강도 (52주 신고가 vs 신저가) ──
+        try:
+            df_market = stock.get_market_ohlcv(start_180, today, '1001') if False else None
+            # 코스피 전체 종목 신고가/신저가 비율
+            tickers = stock.get_market_ticker_list(today, market='KOSPI')
+            high52 = 0; low52 = 0
+            start_52w = (date.today() - timedelta(days=365)).strftime('%Y%m%d')
+            # 샘플링: 전체 대신 주요 100개만 (속도 문제)
+            sample = tickers[:80]
+            for t in sample:
+                try:
+                    df_t = stock.get_market_ohlcv(start_52w, today, t)
+                    if df_t is None or len(df_t) < 2: continue
+                    c_today = df_t['종가'].iloc[-1]
+                    h_52 = df_t['고가'].max()
+                    l_52 = df_t['저가'].min()
+                    if c_today >= h_52 * 0.98: high52 += 1
+                    elif c_today <= l_52 * 1.02: low52 += 1
+                except: continue
+            total = high52 + low52
+            scores['strength'] = float(high52 / total * 100) if total > 0 else 50.0
+            print(f'  주가강도: {scores["strength"]:.1f} (신고가={high52}, 신저가={low52})')
+        except Exception as e:
+            print(f'  주가강도 오류: {e}')
+            scores['strength'] = 50.0
+
+        # ── 지표3: 주가 폭 (상승/하락 종목수 비율) ──
+        try:
+            df_adv = stock.get_market_ohlcv(today, today, '1001')
+            # 시장 전체 등락 데이터
+            tickers_today = stock.get_market_ticker_list(today, market='KOSPI')
+            up = 0; down = 0
+            for t in tickers_today[:200]:  # 200개 샘플
+                try:
+                    df_t = stock.get_market_ohlcv(
+                        (date.today() - timedelta(days=5)).strftime('%Y%m%d'), today, t)
+                    if df_t is None or len(df_t) < 2: continue
+                    chg = df_t['종가'].iloc[-1] - df_t['종가'].iloc[-2]
+                    if chg > 0: up += 1
+                    elif chg < 0: down += 1
+                except: continue
+            total = up + down
+            scores['breadth'] = float(up / total * 100) if total > 0 else 50.0
+            print(f'  주가폭: {scores["breadth"]:.1f} (상승={up}, 하락={down})')
+        except Exception as e:
+            print(f'  주가폭 오류: {e}')
+            scores['breadth'] = 50.0
+
+        # ── 지표4: 변동성 VKOSPI vs 50일 이동평균 ──
+        try:
+            df_vk = stock.get_index_ohlcv(start_180, today, '1005')  # VKOSPI
+            vk_closes = df_vk['종가'].values
+            if len(vk_closes) >= 50:
+                vk_now = vk_closes[-1]
+                vk_ma50 = np.mean(vk_closes[-50:])
+                raw = (vk_ma50 - vk_now) / vk_ma50 * 100  # 역방향
+                scores['volatility'] = float(np.clip((raw + 30) / 60 * 100, 0, 100))
+                print(f'  변동성: {scores["volatility"]:.1f} (VKOSPI={vk_now:.2f}, MA50={vk_ma50:.2f})')
+            else:
+                scores['volatility'] = 50.0
+        except Exception as e:
+            print(f'  변동성 오류: {e}')
+            scores['volatility'] = 50.0
+
+        # ── 지표5: 안전자산 수요 (코스피 20일 수익률 vs 국고채) ──
+        try:
+            df_ktb = stock.get_index_ohlcv(start_30, today, '5000')  # KTB3Y 인덱스
+            df_ksp = stock.get_index_ohlcv(start_30, today, '1001')
+            if len(df_ktb) >= 20 and len(df_ksp) >= 20:
+                kospi_ret = (df_ksp['종가'].iloc[-1] / df_ksp['종가'].iloc[-20] - 1) * 100
+                ktb_ret   = (df_ktb['종가'].iloc[-1] / df_ktb['종가'].iloc[-20] - 1) * 100
+                diff = kospi_ret - ktb_ret
+                scores['safe_demand'] = float(np.clip((diff + 10) / 20 * 100, 0, 100))
+                print(f'  안전자산: {scores["safe_demand"]:.1f} (코스피20d={kospi_ret:.2f}%, 채권={ktb_ret:.2f}%)')
+            else:
+                scores['safe_demand'] = 50.0
+        except Exception as e:
+            print(f'  안전자산 오류: {e}')
+            scores['safe_demand'] = 50.0
+
+        # ── 최종 점수 (5개 평균) ──
+        final = round(sum(scores.values()) / len(scores), 1)
+        print(f'  최종 공포탐욕지수: {final}')
+
+        # ── 30일 추이 (코스피 모멘텀 기반 간이 계산) ──
+        if len(closes) >= 155:
+            for i in range(30, 0, -1):
+                idx = len(closes) - i
+                if idx >= 125:
+                    sub = closes[idx-125:idx]
+                    ma = np.mean(sub)
+                    cur = closes[idx-1]
+                    raw = (cur - ma) / ma * 100
+                    day_score = float(np.clip((raw + 20) / 40 * 100, 0, 100))
+                    d = df_kospi.index[idx-1].strftime('%m/%d')
+                    history.append({'date': d, 'score': round(day_score, 1)})
+
+        return {
+            'score': final,
+            'scores': scores,
+            'history': history[-30:] if history else []
+        }
+
+    except Exception as e:
+        print(f'[공포탐욕지수] 계산 실패: {e}')
+        return None
+
 # ── HTML 생성 ──
-def build_html(stocks):
+def build_html(stocks, fg=None):
     now = datetime.utcnow().strftime('%Y/%m/%d %H:%M UTC')
     palette = [
         ('#f04f5a','rgba(240,79,90,0.08)'),
@@ -89,7 +209,6 @@ def build_html(stocks):
     ]
     MAX_ACTIVE = 6
 
-    # 누적수익률 높은 순으로 정렬
     stocks = sorted(stocks, key=lambda s: (s['data'][-1]['close']/s['data'][0]['close']-1), reverse=True)
 
     def sign(v): return f'+{v:.2f}' if v >= 0 else f'{v:.2f}'
@@ -107,7 +226,7 @@ def build_html(stocks):
         dmap = {r['date']: r['close'] for r in data}
         return [round((dmap[d]/base-1)*100,2) if d in dmap else None for d in all_dates]
 
-    all_cum_js = ',\n'.join(f'  {json.dumps(cum_vals(s["data"]))}' for s in stocks)
+    all_cum_js   = ',\n'.join(f'  {json.dumps(cum_vals(s["data"]))}' for s in stocks)
     all_day_js   = ',\n'.join(f'  {json.dumps(align(s["data"],"change"))}' for s in stocks)
     all_close_js = ',\n'.join(f'  {json.dumps(align(s["data"],"close"))}' for s in stocks)
 
@@ -127,7 +246,7 @@ def build_html(stocks):
             rate_js_lines.append(f'document.getElementById("rateRowWrap{i}").style.display=\'none\';')
     rate_js = '\n'.join(rate_js_lines)
 
-    EYE_ON  = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>' 
+    EYE_ON  = '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
     EYE_OFF = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
 
     chips_html = ''
@@ -136,7 +255,7 @@ def build_html(stocks):
         last = s['data'][-1]
         cum  = round((last['close'] / s['data'][0]['close'] - 1) * 100, 2)
         chips_html += (
-            f'<div class="chip{" off" if i >= MAX_ACTIVE else ""}" id="chip{i}" style="--c:{c}" onclick="toggleDetail({i})">' 
+            f'<div class="chip{" off" if i >= MAX_ACTIVE else ""}" id="chip{i}" style="--c:{c}" onclick="toggleDetail({i})">'
             f'<div class="chip-dot" style="background:{c}"></div>'
             f'<div class="chip-info">'
             f'<span class="chip-name">{s["short"]}</span>'
@@ -145,7 +264,7 @@ def build_html(stocks):
             f'<div class="chip-right">'
             f'<span class="chip-cum" style="color:{c}">{sign(cum)}%</span>'
             f'<span class="chip-eye" id="eye{i}" onclick="event.stopPropagation();toggleStock({i})">'
-            f'<svg id="eyeIcon{i}" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{EYE_ON}</svg>'
+            f'<svg id="eyeIcon{i}" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{EYE_ON if i < MAX_ACTIVE else EYE_OFF}</svg>'
             f'</span>'
             f'</div>'
             f'<div class="chip-detail" id="chipDetail{i}">'
@@ -157,10 +276,154 @@ def build_html(stocks):
             f'</div>'
         )
 
-    palette_js  = json.dumps([p[0] for p in palette])
-    names_js    = json.dumps([s['name'] for s in stocks])
-    labels_js   = json.dumps(labels)
-    stocks_sub  = ' vs '.join(s['name'] for s in stocks)
+    palette_js = json.dumps([p[0] for p in palette])
+    names_js   = json.dumps([s['name'] for s in stocks])
+    labels_js  = json.dumps(labels)
+    stocks_sub = ' vs '.join(s['name'] for s in stocks)
+
+    # ── 공포탐욕지수 HTML 블록 ──
+    if fg:
+        sc = fg['score']
+        sc_scores = fg['scores']
+        sc_hist   = fg['history']
+
+        def fg_color(v):
+            if v < 25: return '#ef4444'
+            if v < 45: return '#f97316'
+            if v < 55: return '#9ca3af'
+            if v < 75: return '#f59e0b'
+            return '#22c55e'
+
+        def fg_label(v):
+            if v < 25: return '극단적 공포'
+            if v < 45: return '공포'
+            if v < 55: return '중립'
+            if v < 75: return '탐욕'
+            return '극단적 탐욕'
+
+        def fg_badge_style(v):
+            if v < 25: return 'background:rgba(239,68,68,.12);color:#ef4444'
+            if v < 45: return 'background:rgba(249,115,22,.12);color:#f97316'
+            if v < 55: return 'background:rgba(156,163,175,.12);color:#9ca3af'
+            if v < 75: return 'background:rgba(245,158,11,.12);color:#f59e0b'
+            return 'background:rgba(34,197,94,.12);color:#22c55e'
+
+        fc = fg_color(sc)
+
+        ind_items = [
+            ('시장 모멘텀', '코스피가 125일 이동평균선 위에 있을수록 탐욕', sc_scores.get('momentum', 50)),
+            ('주가 강도',   '52주 신고가 종목이 신저가보다 많을수록 탐욕',  sc_scores.get('strength', 50)),
+            ('주가 폭',     '상승 종목 수가 하락 종목보다 많을수록 탐욕',    sc_scores.get('breadth', 50)),
+            ('변동성 VKOSPI','변동성 지수가 50일 평균보다 낮을수록 탐욕',   sc_scores.get('volatility', 50)),
+            ('안전자산 수요','코스피 수익률이 국고채보다 높을수록 탐욕',     sc_scores.get('safe_demand', 50)),
+        ]
+
+        ind_html = ''
+        for idx, (iname, idesc, ival) in enumerate(ind_items):
+            ic = fg_color(ival)
+            full = idx == 4
+            ind_html += (
+                f'<div class="ind-card{"  ind-full" if full else ""}">'
+                f'<div class="ind-name">{iname}</div>'
+                f'<div class="ind-desc">{idesc}</div>'
+                f'<div class="ind-bar-wrap"><div class="ind-bar" style="width:{ival:.0f}%;background:{ic}"></div></div>'
+                f'<div class="ind-score-row">'
+                f'<span class="ind-val" style="color:{ic}">{ival:.0f}</span>'
+                f'</div></div>'
+            )
+
+        hist_js   = json.dumps([h['score'] for h in sc_hist])
+        hist_lbl  = json.dumps([h['date']  for h in sc_hist])
+        hist_col  = json.dumps([fg_color(h['score']) for h in sc_hist])
+
+        fg_block = f"""
+<div class="fg-section">
+  <div class="fg-header">
+    <span class="fg-title">코스피 공포탐욕지수</span>
+    <span class="fg-updated">{now[:10]} 기준</span>
+  </div>
+
+  <div class="fg-gauge-wrap">
+    <div style="position:relative;width:200px;height:105px;margin:0 auto">
+      <canvas id="gaugeChart" role="img" aria-label="공포탐욕지수 {sc}점 {fg_label(sc)} 구간">{sc}점 {fg_label(sc)}</canvas>
+    </div>
+    <div class="fg-score" style="color:{fc}">{sc}</div>
+    <div class="fg-badge" style="{fg_badge_style(sc)}">{fg_label(sc)}</div>
+  </div>
+
+  <div class="fg-hist-title">30일 추이</div>
+  <div style="position:relative;width:100%;height:55px;margin-bottom:12px">
+    <canvas id="histChart" role="img" aria-label="30일 공포탐욕지수 추이">30일 추이</canvas>
+  </div>
+
+  <div class="ind-grid">{ind_html}</div>
+
+  <div class="fg-zones">
+    <div class="zone-row" style="background:rgba(239,68,68,.05)">
+      <div class="zone-bar" style="background:#ef4444"></div>
+      <div><div class="zone-range">0~24</div><div class="zone-name" style="color:#ef4444">극단적 공포</div><div class="zone-desc">패닉 셀링 구간. 역발상 매수 기회일 수 있으나 추가 하락 가능</div></div>
+    </div>
+    <div class="zone-row" style="background:rgba(249,115,22,.05)">
+      <div class="zone-bar" style="background:#f97316"></div>
+      <div><div class="zone-range">25~44</div><div class="zone-name" style="color:#f97316">공포</div><div class="zone-desc">매도 압력 우세. 중장기 분할 매수 검토 구간</div></div>
+    </div>
+    <div class="zone-row" style="background:rgba(107,114,128,.05)">
+      <div class="zone-bar" style="background:#6b7280"></div>
+      <div><div class="zone-range">45~54</div><div class="zone-name" style="color:#9ca3af">중립</div><div class="zone-desc">방향성 탐색 구간. 변동성 낮고 추세 전환 신호 주시</div></div>
+    </div>
+    <div class="zone-row" style="background:rgba(245,158,11,.05)">
+      <div class="zone-bar" style="background:#f59e0b"></div>
+      <div><div class="zone-range">55~74</div><div class="zone-name" style="color:#f59e0b">탐욕</div><div class="zone-desc">상승 모멘텀 강함. 수익 실현 및 리스크 관리 필요</div></div>
+    </div>
+    <div class="zone-row" style="background:rgba(34,197,94,.05)">
+      <div class="zone-bar" style="background:#22c55e"></div>
+      <div><div class="zone-range">75~100</div><div class="zone-name" style="color:#22c55e">극단적 탐욕</div><div class="zone-desc">버블 과열 구간. FOMO 매수 폭증. 수익 실현 및 현금 비중 확대 권장</div></div>
+    </div>
+  </div>
+  <div class="fg-note">* 5개 지표 단순 평균 · 참고용 지표 · 투자 결정의 단독 근거로 사용 금지</div>
+</div>
+"""
+        fg_chart_js = f"""
+new Chart(document.getElementById('gaugeChart'),{{
+  type:'doughnut',
+  data:{{datasets:[{{
+    data:[{sc},100-{sc}],
+    backgroundColor:['{fc}','rgba(30,45,69,0.8)'],
+    borderWidth:0,circumference:180,rotation:270
+  }}]}},
+  options:{{responsive:true,maintainAspectRatio:false,cutout:'72%',
+    plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}}}}
+}});
+
+const histData={hist_js};
+const histLabels={hist_lbl};
+const histColors={hist_col};
+new Chart(document.getElementById('histChart'),{{
+  type:'line',
+  data:{{
+    labels:histLabels,
+    datasets:[{{
+      data:histData,
+      borderColor:'{fc}',
+      backgroundColor:'rgba(245,158,11,0.05)',
+      borderWidth:1.5,pointRadius:0,tension:0.3,fill:true,
+      segment:{{borderColor:ctx=>histColors[ctx.p1DataIndex]||'{fc}'}}
+    }}]
+  }},
+  options:{{responsive:true,maintainAspectRatio:false,
+    plugins:{{legend:{{display:false}},tooltip:{{
+      mode:'index',intersect:false,
+      backgroundColor:'#1a2438',borderColor:'#2a3f5f',borderWidth:1,
+      titleColor:'#6b7a99',bodyColor:'#e2e8f0',
+      callbacks:{{label:i=>` ${{i.raw}}점`}}
+    }}}},
+    scales:{{x:{{display:false}},y:{{min:0,max:100,display:false}}}}
+  }}
+}});
+"""
+    else:
+        fg_block = ''
+        fg_chart_js = ''
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -187,7 +450,6 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .chip-code{{font-size:9px;color:var(--muted);font-family:var(--mono)}}
 .chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
 .chip-cum{{font-size:10px;font-family:var(--mono);font-weight:600;white-space:nowrap;text-align:right}}
-.chip-right{{display:flex;flex-direction:column;align-items:flex-end;gap:2px;margin-left:auto;flex-shrink:0}}
 .chip-eye{{padding:2px 3px;border-radius:4px;display:flex;align-items:center;transition:color .1s;color:var(--muted)}}
 .chip-eye:hover{{color:var(--text)}}
 .chip.off .chip-eye svg{{stroke:#8aa0bc}}
@@ -216,16 +478,41 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
 .rate-row{{display:flex;gap:5px;align-items:flex-start;margin-bottom:6px}}
 .rate-label{{font-size:10px;font-family:var(--mono);width:60px;flex-shrink:0;padding-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .rate-cells{{display:flex;gap:3px;flex-wrap:wrap}}
-.rate-cell{{font-size:10px;font-family:var(--mono);padding:2px 5px;border-radius:3px;text-align:center;min-width:50px}}
+.rate-cell{{font-size:10px;font-family:var(--mono);padding:2px 5px;border-radius:3px;text-align:center;min-width:50px;cursor:pointer;border:1px solid transparent;transition:border-color .1s,background .1s}}
 .rate-cell .rc-d{{color:var(--muted);font-size:9px;display:block}}
 .rate-cell .rc-v{{font-weight:600}}
 .rate-cell.up{{background:rgba(240,79,90,.1)}}.rate-cell.dn{{background:rgba(79,156,240,.1)}}
-.rate-cell{{cursor:pointer;border:1px solid transparent;transition:border-color .1s,background .1s}}
 .rate-cell.selected{{border-color:rgba(255,255,255,.35)!important;background:rgba(255,255,255,.07)!important}}
 .rate-cell.selected .rc-d{{color:var(--text)}}
 .rate-cell:hover{{border-color:rgba(255,255,255,.15)}}
 .disclaimer{{font-size:10px;color:#3a4a5a;font-family:var(--mono);margin-top:8px;text-align:right}}
 .copyright{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center;margin-top:20px;padding-top:12px;border-top:1px solid var(--border)}}
+
+/* ── 공포탐욕지수 ── */
+.fg-section{{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px}}
+.fg-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}}
+.fg-title{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.8px}}
+.fg-updated{{font-size:10px;color:var(--muted);font-family:var(--mono)}}
+.fg-gauge-wrap{{display:flex;flex-direction:column;align-items:center;margin-bottom:12px}}
+.fg-score{{font-size:30px;font-weight:600;font-family:var(--mono);margin:2px 0}}
+.fg-badge{{font-size:11px;padding:3px 12px;border-radius:12px;font-family:var(--mono);margin-bottom:4px}}
+.fg-hist-title{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}}
+.ind-grid{{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}}
+.ind-card{{background:var(--bg);border-radius:8px;padding:9px 10px}}
+.ind-full{{grid-column:span 2}}
+.ind-name{{font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px}}
+.ind-desc{{font-size:10px;color:#8a9ab5;line-height:1.5;margin-bottom:5px}}
+.ind-bar-wrap{{height:3px;background:#1e2d45;border-radius:2px;overflow:hidden;margin-bottom:3px}}
+.ind-bar{{height:100%;border-radius:2px}}
+.ind-score-row{{display:flex;justify-content:space-between}}
+.ind-val{{font-size:12px;font-weight:600;font-family:var(--mono)}}
+.fg-zones{{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}}
+.zone-row{{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:6px}}
+.zone-bar{{width:3px;min-height:36px;border-radius:2px;flex-shrink:0;margin-top:2px}}
+.zone-range{{font-size:9px;color:var(--muted);font-family:var(--mono);margin-bottom:1px}}
+.zone-name{{font-size:11px;font-weight:600;font-family:var(--mono);margin-bottom:2px}}
+.zone-desc{{font-size:10px;color:#8a9ab5;line-height:1.4}}
+.fg-note{{font-size:10px;color:#3a4a5a;font-family:var(--mono);text-align:center}}
 </style>
 </head>
 <body>
@@ -264,6 +551,8 @@ header{{display:flex;align-items:center;justify-content:space-between;margin-bot
   <div class="rate-table">{rate_rows_html}</div>
   <div class="disclaimer">* 정규장 종가 기준 · 시간외거래 미반영 · 데이터 오류 가능성 있음</div>
 </div>
+
+{fg_block}
 
 <script>
 const labels  = {labels_js};
@@ -373,7 +662,7 @@ const makeOpts=which=>({{
 
 const chartCum=new Chart(document.getElementById('chartCum'),{{type:'line',data:{{labels,datasets:mkDatasets(cumData)}},options:makeOpts('cum'),plugins:[endLabelPlugin]}});
 const chartDay=new Chart(document.getElementById('chartDay'),{{type:'line',data:{{labels,datasets:mkDatasets(dayData)}},options:makeOpts('day'),plugins:[endLabelPlugin]}});
-// 초기 하이드 종목 눈 아이콘 교체
+
 names.forEach((_,i)=>{{
   if(!active[i]){{
     const el=document.getElementById('eyeIcon'+i);
@@ -383,7 +672,7 @@ names.forEach((_,i)=>{{
 
 function toggleDetail(i){{
   const chip=document.getElementById('chip'+i);
-  if(!active[i])return;  // 하이드 상태면 무반응
+  if(!active[i])return;
   const wasOpen=chip.classList.contains('show-detail');
   document.querySelectorAll('.chip').forEach(c=>c.classList.remove('show-detail'));
   if(!wasOpen)chip.classList.add('show-detail');
@@ -393,7 +682,7 @@ function toggleStock(i){{
   active[i]=!active[i];
   const chip=document.getElementById('chip'+i);
   chip.classList.toggle('off',!active[i]);
-  chip.classList.remove('show-detail');  // 상세 닫기
+  chip.classList.remove('show-detail');
   document.getElementById('eyeIcon'+i).innerHTML=active[i]?EYE_ON:EYE_OFF;
   const wrap=document.getElementById('rateRowWrap'+i);
   if(wrap)wrap.style.display=active[i]?'':'none';
@@ -417,32 +706,33 @@ function buildRow(id,rows){{
 }}
 {rate_js}
 
-// 날짜 선택 하이라이트
-let selectedDate = null;
-document.addEventListener('click', e => {{
-  const cell = e.target.closest('.rate-cell');
-  if (!cell) return;
-  const date = cell.querySelector('.rc-d')?.textContent;
-  if (!date) return;
-  if (selectedDate === date) {{
-    selectedDate = null;
-    document.querySelectorAll('.rate-cell').forEach(c => c.classList.remove('selected'));
-  }} else {{
-    selectedDate = date;
-    document.querySelectorAll('.rate-cell').forEach(c => {{
-      c.classList.toggle('selected', c.querySelector('.rc-d')?.textContent === date);
+let selectedDate=null;
+document.addEventListener('click',e=>{{
+  const cell=e.target.closest('.rate-cell');
+  if(!cell)return;
+  const d=cell.querySelector('.rc-d')?.textContent;
+  if(!d)return;
+  if(selectedDate===d){{
+    selectedDate=null;
+    document.querySelectorAll('.rate-cell').forEach(c=>c.classList.remove('selected'));
+  }}else{{
+    selectedDate=d;
+    document.querySelectorAll('.rate-cell').forEach(c=>{{
+      c.classList.toggle('selected',c.querySelector('.rc-d')?.textContent===d);
     }});
   }}
 }});
 
 function setTab(t){{
-  document.getElementById('tab-cum').style.display=t==='cum'?'':' none';
-  document.getElementById('tab-day').style.display=t==='day'?'':' none';
+  document.getElementById('tab-cum').style.display=t==='cum'?'':'none';
+  document.getElementById('tab-day').style.display=t==='day'?'':'none';
   document.querySelectorAll('.tab').forEach((el,i)=>
     el.classList.toggle('active',(i===0&&t==='cum')||(i===1&&t==='day')));
 }}
+
+{fg_chart_js}
 </script>
-  <div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
+<div class="copyright">© 2026 코렐리안 · All Rights Reserved</div>
 </body>
 </html>"""
 
@@ -472,9 +762,12 @@ if __name__ == '__main__':
         print('오류: 최소 2개 종목 필요')
         sys.exit(1)
 
+    # 공포탐욕지수 계산
+    fg = calc_fear_greed()
+
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'etf_dashboard.html')
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(build_html(stocks))
+        f.write(build_html(stocks, fg))
 
     print(f'\n✓ 완료: {out}')
     for s in stocks:
